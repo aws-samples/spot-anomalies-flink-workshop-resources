@@ -1,0 +1,5 @@
+kafka-python==2.0.2
+Faker==24.4.0
+ipaddress==1.0.23
+python-snappy==0.7.1
+aws-msk-iam-sasl-signer-python==1.0.1

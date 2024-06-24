@@ -1,0 +1,14 @@
+[
+  {
+    "PropertyGroupId": "main",
+    "PropertyMap": {
+      "sourceBootstrapServer": "boot-eojc22lr.c2.kafka-serverless.us-east-1.amazonaws.com:9098",
+      "sourceTopic": "flow-log-ingest",
+      "initpos": "EARLIEST",
+      "sinkBootstrapServer": "boot-eojc22lr.c2.kafka-serverless.us-east-1.amazonaws.com:9099",
+      "sinkTopic": "flow-log-egress",
+      "threshold": 3.0,
+      "sagemakerEndpoint": "ipinsights-2024-04-15-15-51-45-169"
+    }
+  }
+]

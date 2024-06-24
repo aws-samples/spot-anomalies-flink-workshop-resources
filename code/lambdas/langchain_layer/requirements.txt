@@ -1,0 +1,2 @@
+langchain==0.1.13
+aws-lambda-powertools[tracer,parser]==2.35.1

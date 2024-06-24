@@ -1,0 +1,11 @@
+{
+  "key-provider:account=868520365864:aliasName=alias/aws/sns:region=us-east-1": {
+    "keyId": "00c22580-c39d-417b-8cc3-4926a942ea76"
+  },
+  "key-provider:account=471112911687:aliasName=alias/aws/sns:region=us-east-1": {
+    "keyId": "1ece84d7-b418-464d-9fae-e1b1939edf05"
+  },
+  "key-provider:account=868520365864:aliasName=alias/aws/sns:region=us-west-2": {
+    "keyId": "7213317d-def6-4901-8e06-c77443f0cf2e"
+  }
+}
