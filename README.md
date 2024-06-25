@@ -15,3 +15,6 @@ The lambda code can be found under `code/` tab under `lambdas` for any component
 
 The remaining components of the workshop can be found via the workshop itself found [here](https://catalog.us-east-1.prod.workshops.aws/workshops/7cb7c933-4024-4b69-a29a-b1159d6b909f/).
 
+
+### 4. Sagemaker Jupyter notebook
+In this sample notebook, you will train, build, and deploy a model using the IP Insights algorithm and Amazon VPC flowlog data. You will query an Athena table and create a dataset for model training. You will perform data transformation on the results from the VPC flowlog data. Train an IP Insights model with this data. Deploy your model to a SageMaker endpoint and ultimately test your model.
