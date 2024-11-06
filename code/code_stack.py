@@ -366,7 +366,24 @@ class CodeStack(Stack):
             memory_size=2048,
         )
 
-        return lambda_function_summarize
+        firehose_json_parse_function = lambda_.Function(
+            self,
+            "firehose_json_parse",
+            function_name=f"{Aws.STACK_NAME}-firehose-json-parse",
+            description="Lambda code for parsing JSON messages from MSK to Amazon Firehose.",
+            architecture=lambda_.Architecture.ARM_64,
+            handler="parse_json.lambda_handler",
+            runtime=self.lambda_runtime,
+            code=lambda_.Code.from_asset(
+                path.join(os.getcwd(), LAMBDA_PATH, "parse_json")
+            ),
+            environment={},
+            layers=[],
+            role=publish_firehose_role,
+            timeout=Duration.seconds(60),
+            memory_size=512,
+        )
+
 
     def create_lambda_layer(self, layer_name):
         """
