@@ -196,16 +196,11 @@ def lambda_handler(event, context):
         data["writer_id"] = random_sample.iloc[0]
         time_data = datetime.datetime.now()
 
-        if os.environ["ANOMALY"] == "True":
+        if os.environ["ANOMALY"] == "True" and random.random() < 0.001:
             # Probability of 0.1% to generate a anomalous log
-            if random.random() < 0.001:
-                data["ip_src"] = get_random_ip(external_ip_data)
-                data["text"] = generate_fake_text(
-                    event_type, str(time_data), True)
-            else:
-                data["ip_src"] = random_sample.iloc[1]
-                data["text"] = generate_fake_text(
-                    event_type, str(time_data), False)
+            data["ip_src"] = get_random_ip(external_ip_data)
+            data["text"] = generate_fake_text(
+                event_type, str(time_data), True)
         else:
             data["ip_src"] = random_sample.iloc[1]
             data["text"] = generate_fake_text(
@@ -215,12 +210,10 @@ def lambda_handler(event, context):
         data["port_src"] = random.choice(PORTS)
         data["port_dst"] = random.choice(PORTS)
         data["ip_proto"] = random.choice(PROTOCOLS)
-
         data["timestamp_start"] = str(time_data - time_delay)
         data["timestamp_end"] = str(time_data)
         data["bytes"] = random.randint(1, 1000)
         data["packets"] = random.randint(1, 100)
-
         messages.append(data)
 
     print("End of data gen - ",
