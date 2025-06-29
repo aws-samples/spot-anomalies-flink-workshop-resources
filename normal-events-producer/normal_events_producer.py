@@ -65,8 +65,7 @@ def produce_normal_events():
         sasl_oauth_token_provider=tp,
         client_id=socket.gethostname(),
         key_serializer=lambda key: key.encode("utf-8"),
-        value_serializer=lambda value: json.dumps(value).encode("utf-8"),
-        api_version=(2, 0, 0)
+        value_serializer=lambda value: json.dumps(value).encode("utf-8")
     )
 
     topic = os.environ["TOPIC_NAME"]
