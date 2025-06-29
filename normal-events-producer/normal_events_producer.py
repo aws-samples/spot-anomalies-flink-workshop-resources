@@ -11,9 +11,9 @@ import time
 
 from faker import Faker
 from faker.providers import internet
-
 from kafka import KafkaProducer
 from kafka.errors import KafkaError
+from aws_msk_iam_sasl_signer import MSKAuthTokenProvider
 
 class MSKTokenProvider:
     def token(self):
