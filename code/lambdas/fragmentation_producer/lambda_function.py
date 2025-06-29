@@ -4,11 +4,9 @@ import json
 import datetime
 import ipaddress
 import random
-import boto3
-import io
 import os
 import socket
-import pandas as pd
+import hashlib
 
 from faker import Faker
 from faker.providers import internet
@@ -18,8 +16,9 @@ from kafka.errors import KafkaError
 
 from aws_msk_iam_sasl_signer import MSKAuthTokenProvider
 
-# Constants
-FILE_KEY = os.environ["FILE_KEY"]
+def generate_8char_hash():
+    """Generate 8-character hash for unique identifiers"""
+    return hashlib.md5(str(random.random()).encode()).hexdigest()[:8]
 
 # Base data template
 BASE_DATA = {
@@ -52,6 +51,7 @@ INTERNAL_IP_RANGES = [
 
 PROTOCOLS = ["UDP", "TCP", "ICMP"]
 PORTS = ["53", "80", "443", "8080", "1433"]
+EVENT_TYPES = ["GET", "POST", "DELETE", "PATCH", "PUT"]
 
 fake = Faker()
 fake.add_provider(internet)
@@ -82,22 +82,12 @@ def generate_internal_ips() -> list:
         internal_ips.extend([str(ip) for ip in list(network.hosts())[:50]])
     return internal_ips
 
-def load_csv_data(bucket_name: str) -> pd.DataFrame:
-    """Reads CSV dataset from S3 bucket"""
-    s3_client = boto3.client("s3")
-    obj = s3_client.get_object(Bucket=bucket_name, Key=FILE_KEY)
-    df = pd.read_csv(io.BytesIO(obj["Body"].read()))
-    return df
-
 def lambda_handler(event, context):
     """Main function to generate fragmentation anomaly events"""
     
     print("Starting fragmentation anomaly generator...")
     
     tp = MSKTokenProvider()
-    
-    # Load CSV data
-    df = load_csv_data(os.environ["BUCKET_NAME"])
     
     suspicious_ips = generate_suspicious_ips()
     internal_ips = generate_internal_ips()
@@ -139,6 +129,7 @@ def lambda_handler(event, context):
             
             for frag_num in range(fragment_count):
                 frag_data = data.copy()
+                frag_data["event_type"] = random.choice(EVENT_TYPES)
                 frag_data["ip_src"] = attacker_ip
                 frag_data["ip_dst"] = target_ip
                 frag_data["port_src"] = random.choice(PORTS)
@@ -148,7 +139,7 @@ def lambda_handler(event, context):
                 frag_data["timestamp_end"] = str(time_data)
                 frag_data["packets"] = 1
                 frag_data["bytes"] = random.randint(8, 64)  # Small fragment sizes
-                frag_data["writer_id"] = f"frag-detector-{random.randint(1, 5)}"
+                frag_data["writer_id"] = f"ENI{generate_8char_hash()}-x{random.randint(1, 5)}"
                 
                 fragment_offset = frag_num * 8
                 more_fragments = frag_num < fragment_count - 1
@@ -160,6 +151,7 @@ def lambda_handler(event, context):
         else:
             # Generate normal traffic
             data["ip_src"] = fake.ipv4_private()
+            data["event_type"] = random.choice(EVENT_TYPES)
             data["ip_dst"] = random.choice(internal_ips)
             data["port_src"] = random.choice(PORTS)
             data["port_dst"] = random.choice(PORTS)
@@ -168,7 +160,7 @@ def lambda_handler(event, context):
             data["timestamp_end"] = str(time_data)
             data["packets"] = random.randint(10, 500)
             data["bytes"] = random.randint(64, 1500)
-            data["writer_id"] = f"normal-traffic-{random.randint(1, 10)}"
+            data["writer_id"] = f"ENI-{generate_8char_hash()}-x{random.randint(1, 5)}"
             data["text"] = f"Normal traffic from {data['ip_src']} to {data['ip_dst']}"
             
             messages.append(data)
