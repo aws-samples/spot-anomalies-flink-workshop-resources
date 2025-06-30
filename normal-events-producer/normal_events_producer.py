@@ -15,9 +15,11 @@ from kafka import KafkaProducer
 from kafka.errors import KafkaError
 from aws_msk_iam_sasl_signer import MSKAuthTokenProvider
 
+# For IAM auth
 class MSKTokenProvider:
     def token(self):
-        token, _ = MSKAuthTokenProvider.generate_auth_token(os.environ["AWS_REGION"])
+        token, _ = MSKAuthTokenProvider.generate_auth_token(
+            os.environ["AWS_REGION"])
         return token
 
 def generate_8char_hash():
@@ -53,8 +55,7 @@ def produce_normal_events():
         "bootstrap_servers": os.environ["BOOTSTRAP_SERVER"],
         "security_protocol": "SASL_SSL",
         "sasl_mechanism": "OAUTHBEARER",
-        "client_id": socket.gethostname(),
-        "api_version": (2, 0, 0)
+        "client_id": socket.gethostname()
     }
     print(f"Kafka Producer Config: {producer_config}")
     
@@ -65,7 +66,9 @@ def produce_normal_events():
         sasl_oauth_token_provider=tp,
         client_id=socket.gethostname(),
         key_serializer=lambda key: key.encode("utf-8"),
-        value_serializer=lambda value: json.dumps(value).encode("utf-8")
+        value_serializer=lambda value: json.dumps(value).encode("utf-8"),
+        linger_ms=10,
+        batch_size=262144,
     )
 
     topic = os.environ["TOPIC_NAME"]

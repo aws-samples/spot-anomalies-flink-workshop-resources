@@ -38,12 +38,12 @@ python normal_events_producer.py
 
 ### Build container:
 ```bash
-docker build -t normal-events-producer .
+docker build -t normal-flow-log-producer .
 ```
 
 ### Run container:
 ```bash
-docker run -e BOOTSTRAP_SERVER="your-kafka-server:9092" -e TOPIC_NAME="your-topic" normal-events-producer
+docker run -i -e BOOTSTRAP_SERVER="your-kafka-server:9092" -e TOPIC_NAME="your-topic" normal-flow-log-producer:latest 
 ```
 
 ## Deactivate Virtual Environment
