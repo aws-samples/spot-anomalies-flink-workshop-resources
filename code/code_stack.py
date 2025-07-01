@@ -332,9 +332,7 @@ class CodeStack(Stack):
                 "POWERTOOLS_SERVICE_NAME": "app-summarize",
                 "POWERTOOLS_METRICS_NAMESPACE": f"{Aws.STACK_NAME}-ns",
                 "POWERTOOLS_LOG_LEVEL": APP_LOG_LEVEL,
-                "ANOMALY": "True",
                 "BOOTSTRAP_SERVER": BOOTSTRAP_SERVER,
-                "BUCKET_NAME": BUCKET_NAME,
                 "CY": "1",
                 "MESSAGE_COUNT": "1000",
                 "TOPIC_NAME": "flow-log-ingest",
@@ -382,35 +380,6 @@ class CodeStack(Stack):
             role=publish_firehose_role,
             timeout=Duration.seconds(60),
             memory_size=512,
-        )
-
-        lambda_function_fragmentation_producer = lambda_.Function(
-            self,
-            "fragmentation_producer",
-            function_name=f"{Aws.STACK_NAME}-fragmentation-producer",
-            description="Lambda code for generating packet fragmentation anomaly events.",
-            architecture=lambda_.Architecture.ARM_64,
-            handler="lambda_function.lambda_handler",
-            runtime=self.lambda_runtime,
-            code=lambda_.Code.from_asset(
-                path.join(os.getcwd(), LAMBDA_PATH, "fragmentation_producer"),
-                exclude=["test_*.py", "README.md", "requirements.txt", "venv/"]
-            ),
-            environment={
-                "POWERTOOLS_SERVICE_NAME": "app-fragmentation",
-                "POWERTOOLS_METRICS_NAMESPACE": f"{Aws.STACK_NAME}-ns",
-                "POWERTOOLS_LOG_LEVEL": APP_LOG_LEVEL,
-                "ANOMALY": "True",
-                "BOOTSTRAP_SERVER": BOOTSTRAP_SERVER,
-                "CY": "1",
-                "MESSAGE_COUNT": "1000",
-                "TOPIC_NAME": "flow-log-ingest",
-            },
-            layers=[pandas_layer, msk_layer],
-            role=producer_role,
-            timeout=Duration.minutes(15),
-            memory_size=2048,
-            tracing=lambda_.Tracing.ACTIVE,
         )
 
 
