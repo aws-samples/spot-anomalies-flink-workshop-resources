@@ -18,27 +18,18 @@
 
 package com.amazonaws.proserve.workshop;
 
-import com.amazonaws.proserve.workshop.process.AsyncPrediction;
-import com.amazonaws.proserve.workshop.process.EventsAggregator;
-import com.amazonaws.proserve.workshop.serde.JsonDeserializationSchema;
-import com.amazonaws.proserve.workshop.process.model.Event;
-import com.amazonaws.proserve.workshop.serde.JsonSerializationSchema;
 import com.amazonaws.services.kinesisanalytics.runtime.KinesisAnalyticsRuntime;
 import lombok.extern.slf4j.Slf4j;
 import org.apache.commons.lang3.StringUtils;
-import org.apache.flink.api.common.eventtime.WatermarkStrategy;
-import org.apache.flink.connector.kafka.sink.KafkaRecordSerializationSchema;
-import org.apache.flink.connector.kafka.sink.KafkaSink;
-import org.apache.flink.connector.kafka.source.KafkaSource;
-import org.apache.flink.connector.kafka.source.enumerator.initializer.OffsetsInitializer;
-import org.apache.flink.streaming.api.datastream.*;
+import org.apache.flink.table.api.EnvironmentSettings;
+import org.apache.flink.table.api.bridge.java.StreamStatementSet;
+import org.apache.flink.table.api.bridge.java.StreamTableEnvironment;
 import org.apache.flink.streaming.api.environment.StreamExecutionEnvironment;
 import picocli.CommandLine;
 
 import java.io.IOException;
 import java.util.Map;
 import java.util.Properties;
-import java.util.concurrent.TimeUnit;
 
 /**
  * Entry point class. Defines and parses CLI arguments, instantiate top level
@@ -61,57 +52,105 @@ public class AnomalyDetection implements Runnable {
     @Override
     public void run() {
         try {
-            Properties kafkaProps = new Properties();
-            kafkaProps.setProperty("security.protocol", "SASL_SSL");
-            kafkaProps.setProperty("sasl.mechanism", "AWS_MSK_IAM");
-            kafkaProps.setProperty("sasl.jaas.config", "software.amazon.msk.auth.iam.IAMLoginModule required;");
-            kafkaProps.setProperty("sasl.client.callback.handler.class",
-                    "software.amazon.msk.auth.iam.IAMClientCallbackHandler");
 
             Properties jobProps = getProps(propertyGroupId, propertyFile);
 
-            String initpos = getProperty(jobProps, "initpos", "EARLIEST");
-            OffsetsInitializer startingOffsets;
-            if ("LATEST".equals(initpos)) {
-                startingOffsets = OffsetsInitializer.latest();
-            } else if ("EARLIEST".equals(initpos)) {
-                startingOffsets = OffsetsInitializer.earliest();
-            } else {
-                if (StringUtils.isBlank(initpos)) {
-                    throw new IllegalArgumentException(
-                            "Please set value for initial position to be one of LATEST, EARLIEST or use a timestamp for TIMESTAMP position");
-                }
-                startingOffsets = OffsetsInitializer.timestamp(Long.parseLong(initpos));
-            }
-
             String sourceTopic = getProperty(jobProps, "sourceTopic", "");
             String sourceBootstrapServer = getProperty(jobProps, "sourceBootstrapServer", "");
-            final KafkaSource<Event> dataSource = KafkaSource.<Event>builder().setProperties(kafkaProps)
-                    .setBootstrapServers(sourceBootstrapServer).setGroupId("AnomalyDetectorApp")
-                    .setTopics(sourceTopic).setStartingOffsets(startingOffsets)
-                    .setValueOnlyDeserializer(JsonDeserializationSchema.forSpecific(Event.class)).build();
-
-            final StreamExecutionEnvironment env = StreamExecutionEnvironment.getExecutionEnvironment();
-            final DataStream<Event> stream = env.fromSource(dataSource, WatermarkStrategy.noWatermarks(), "Source");
-
-            String sageMakerEndpoint = getProperty(jobProps, "sagemakerEndpoint", "");
-            double threshold = getProperty(jobProps, "threshold", 3.0);
-            int maxEvents = getProperty(jobProps, "maxEvents", 100);
-            int freqSecs = getProperty(jobProps, "freqSecs", 5);
-            DataStream<Event> predictions = AsyncDataStream.unorderedWait(
-                    stream.keyBy(Event::getWriterId).process(new EventsAggregator(maxEvents, freqSecs)),
-                    new AsyncPrediction(sageMakerEndpoint, threshold), 10_000, TimeUnit.MILLISECONDS, 100);
-
             String sinkTopic = getProperty(jobProps, "sinkTopic", "");
             String sinkBootstrapServer = getProperty(jobProps, "sinkBootstrapServer", "");
-            KafkaSink<Event> sink = KafkaSink.<Event>builder().setKafkaProducerConfig(kafkaProps)
-                    .setBootstrapServers(sinkBootstrapServer)
-                    .setRecordSerializer(KafkaRecordSerializationSchema.builder().setTopic(sinkTopic)
-                            .setValueSerializationSchema(JsonSerializationSchema.forSpecific(Event.class)).build())
-                    .build();
-            predictions.sinkTo(sink).name("Sink");
 
-            env.execute();
+            final StreamExecutionEnvironment env = StreamExecutionEnvironment.getExecutionEnvironment();
+            final StreamTableEnvironment tableEnv = StreamTableEnvironment.create(env, EnvironmentSettings.newInstance().build());
+
+            tableEnv.executeSql("CREATE TABLE log_events_input (\n" +
+                    "event_type VARCHAR,\n" +
+                    "ip_src VARCHAR,\n" +
+                    "ip_dst VARCHAR,\n" +
+                    "timestamp_start BIGINT,\n" +
+                    "timestamp_end BIGINT,\n" +
+                    "writer_id VARCHAR,\n" +
+                    "packets INT,\n" +
+                    "`bytes` INT,\n" +
+                    "`text` VARCHAR,\n" +
+                    "event_time AS TO_TIMESTAMP_LTZ(timestamp_start, 3),\n" +
+                    "WATERMARK FOR event_time AS event_time - INTERVAL '1' SECOND\n" +
+                    ") WITH (\n" +
+                    "'connector'= 'kafka',\n" +
+                    "'topic' = '" + sourceTopic + "',\n" +
+                    "'properties.bootstrap.servers' = '" + sourceBootstrapServer + "',\n" +
+                    "'format'= 'json',\n" +
+                    "'properties.group.id' = 'group-1',\n" +
+                    "'scan.startup.mode' = 'latest-offset',\n" +
+                    "'properties.security.protocol' = 'SASL_SSL',\n" +
+                    "'properties.sasl.mechanism' = 'AWS_MSK_IAM',\n" +
+                    "'properties.sasl.jaas.config' = 'software.amazon.msk.auth.iam.IAMLoginModule required;',\n" +
+                    "'properties.sasl.client.callback.handler.class' = 'software.amazon.msk.auth.iam.IAMClientCallbackHandler'\n" +
+                    ")\n");
+
+            tableEnv.executeSql("CREATE TABLE log_events_output (\n" +
+                    "attack_start_time TIMESTAMP_LTZ(3),\n" +
+                    "attack_end_time TIMESTAMP_LTZ(3),\n" +
+                    "attacker_id VARCHAR,\n" +
+                    "target_ip VARCHAR,\n" +
+                    "fragment_count BIGINT,\n" +
+                    "avg_packets DOUBLE,\n" +
+                    "avg_fragment_size DOUBLE,\n" +
+                    "size_reduction_percent DOUBLE\n" +
+                    ") WITH (\n" +
+                    "'connector'= 'kafka',\n" +
+                    "'topic' = '" + sinkTopic + "',\n" +
+                    "'properties.bootstrap.servers' = '" + sinkBootstrapServer + "',\n" +
+                    "'format'= 'json',\n" +
+                    "'properties.group.id' = 'group-2',\n" +
+                    "'scan.startup.mode' = 'latest-offset',\n" +
+                    "'properties.security.protocol' = 'SASL_SSL',\n" +
+                    "'properties.sasl.mechanism' = 'AWS_MSK_IAM',\n" +
+                    "'properties.sasl.jaas.config' = 'software.amazon.msk.auth.iam.IAMLoginModule required;',\n" +
+                    "'properties.sasl.client.callback.handler.class' = 'software.amazon.msk.auth.iam.IAMClientCallbackHandler'\n" +
+                    ")");
+            StreamStatementSet statementSet = tableEnv.createStatementSet();
+            statementSet.addInsertSql("insert into log_events_output \n" +
+                    "WITH enriched_events AS (\n" +
+                    "SELECT *,\n" +
+                    "           AVG(CAST(packets AS DOUBLE)) OVER (\n" +
+                    "               PARTITION BY ip_dst\n" +
+                    "               ORDER BY event_time \n" +
+                    "               RANGE BETWEEN INTERVAL '1' HOUR PRECEDING AND CURRENT ROW\n" +
+                    "           ) as avg_packets\n" +
+                    "    FROM log_events_input\n" +
+                    ")\n" +
+                    "SELECT \n" +
+                    "        attack_start_time,\n" +
+                    "        attack_end_time,\n" +
+                    "        attacker_ip,\n" +
+                    "        target_ip,\n" +
+                    "        fragment_count,\n" +
+                    "        avg_packets,\n" +
+                    "        avg_fragment_size,\n" +
+                    "        (avg_packets - avg_fragment_size) / avg_packets * 100 as size_reduction_percent\n" +
+                    "    FROM enriched_events\n" +
+                    "    MATCH_RECOGNIZE (\n" +
+                    "        PARTITION BY ip_dst\n" +
+                    "        ORDER BY event_time\n" +
+                    "        MEASURES\n" +
+                    "            FIRST(A.event_time) as attack_start_time,\n" +
+                    "            LAST(TO_TIMESTAMP_LTZ(A.timestamp_end, 3)) as attack_end_time,\n" +
+                    "            FIRST(A.ip_src) as attacker_ip,\n" +
+                    "            FIRST(A.ip_dst) as target_ip,\n" +
+                    "            AVG(A.avg_packets) as avg_packets,\n" +
+                    "            COUNT(*) as fragment_count,\n" +
+                    "            AVG(CAST(A.`bytes` AS DOUBLE) / CAST(A.packets AS DOUBLE)) as avg_fragment_size\n" +
+                    "        ONE ROW PER MATCH\n" +
+                    "        AFTER MATCH SKIP PAST LAST ROW\n" +
+                    "        PATTERN (A{20,} B)\n" +
+                    "        WITHIN INTERVAL '2' MINUTE\n" +
+                    "        DEFINE\n" +
+                    "            A AS (\n" +
+                    "               CAST(A.packets AS DOUBLE) < (A.avg_packets * 0.1)\n" +
+                    "            )\n" +
+                    "    )");
+            statementSet.execute();
         } catch (Exception ex) {
             log.error("Failed to initialize job because of exception: {}, stack: {}", ex, ex.getStackTrace());
             throw new RuntimeException(ex);
@@ -143,29 +182,5 @@ public class AnomalyDetection implements Runnable {
             value = defaultValue;
         }
         return value;
-    }
-
-    protected static double getProperty(Properties properties, String name, double defaultValue) {
-        String value = properties.getProperty(name);
-        if (StringUtils.isBlank(value)) {
-            return defaultValue;
-        }
-        try {
-            return Double.parseDouble(value);
-        } catch (NumberFormatException e) {
-            return defaultValue;
-        }
-    }
-
-    protected static int getProperty(Properties properties, String name, int defaultValue) {
-        String value = properties.getProperty(name);
-        if (StringUtils.isBlank(value)) {
-            return defaultValue;
-        }
-        try {
-            return Integer.parseInt(value);
-        } catch (NumberFormatException e) {
-            return defaultValue;
-        }
     }
 }
