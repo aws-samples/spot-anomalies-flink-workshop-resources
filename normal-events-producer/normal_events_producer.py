@@ -74,7 +74,7 @@ def produce_normal_events():
     topic = os.environ["TOPIC_NAME"]
     
     while True:
-        time_data = datetime.datetime.now()
+        current_time_ms = int(time.time() * 1000)
         
         data = {
             "event_type": random.choice(event_types),
@@ -83,8 +83,8 @@ def produce_normal_events():
             "port_src": random.choice(ports),
             "port_dst": random.choice(ports),
             "ip_proto": random.choice(protocols),
-            "timestamp_start": str(time_data - datetime.timedelta(seconds=1)),
-            "timestamp_end": str(time_data),
+            "timestamp_start": current_time_ms - 10,
+            "timestamp_end": current_time_ms,
             "packets": random.randint(10, 500),
             "bytes": random.randint(64, 1500),
             "writer_id": f"ENI-{generate_8char_hash()}-x{random.randint(1, 5)}",
