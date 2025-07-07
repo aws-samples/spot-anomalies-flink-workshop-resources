@@ -84,7 +84,7 @@ def produce_normal_events():
             "ip_proto": random.choice(protocols),
             "timestamp_start": current_time_ms - 10,
             "timestamp_end": current_time_ms,
-            "packets": random.randint(10, 500),
+            "packets": random.randint(100, 500),
             "bytes": random.randint(64, 1500),
             "writer_id": f"ENI-{generate_8char_hash()}-x{random.randint(1, 5)}",
             "text": f"Normal traffic from {fake.ipv4_private()} to {random.choice(internal_ips)}"

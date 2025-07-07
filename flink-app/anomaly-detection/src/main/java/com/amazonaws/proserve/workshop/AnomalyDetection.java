@@ -22,11 +22,18 @@ import com.amazonaws.proserve.workshop.process.model.Event;
 import com.amazonaws.proserve.workshop.serde.JsonDeserializationSchema;
 import com.amazonaws.proserve.workshop.serde.JsonSerializationSchema;
 import com.amazonaws.services.kinesisanalytics.runtime.KinesisAnalyticsRuntime;
+
+import lombok.val;
 import lombok.extern.slf4j.Slf4j;
+
+import org.apache.commons.collections.functors.TruePredicate;
 import org.apache.commons.lang3.StringUtils;
+import org.apache.flink.api.common.functions.AggregateFunction;
 import org.apache.flink.cep.CEP;
 import org.apache.flink.cep.PatternStream;
+import org.apache.flink.cep.nfa.aftermatch.AfterMatchSkipStrategy;
 import org.apache.flink.cep.pattern.Pattern;
+import org.apache.flink.cep.pattern.conditions.IterativeCondition;
 import org.apache.flink.cep.pattern.conditions.SimpleCondition;
 import org.apache.flink.streaming.api.windowing.time.Time;
 import org.apache.flink.streaming.api.windowing.assigners.SlidingEventTimeWindows;
@@ -51,6 +58,8 @@ import picocli.CommandLine;
 import java.io.IOException;
 import java.util.Map;
 import java.util.Properties;
+import org.apache.flink.api.common.functions.AggregateFunction;
+import android.content.Context;
 
 /**
  * Entry point class. Defines and parses CLI arguments, instantiate top level
@@ -80,8 +89,17 @@ public class AnomalyDetection implements Runnable {
             String sourceBootstrapServer = getProperty(jobProps, "sourceBootstrapServer", "");
             String sinkTopic = getProperty(jobProps, "sinkTopic", "");
             String sinkBootstrapServer = getProperty(jobProps, "sinkBootstrapServer", "");
+            log.info("Flink Job properties map: sourceTopic {} sinkTopic {} sourceBootstrapServer {} sinkBootstrapServer {}", sourceTopic,  sinkTopic, sourceBootstrapServer, sinkBootstrapServer);
 
             final StreamExecutionEnvironment env = StreamExecutionEnvironment.getExecutionEnvironment();
+            
+            // Configure Flink web dashboard port for local environment only
+            if (env instanceof org.apache.flink.streaming.api.environment.LocalStreamEnvironment) {
+                org.apache.flink.configuration.Configuration config = new org.apache.flink.configuration.Configuration();
+                // config.setString("rest.port", "53374");
+                env.configure(config);
+                env.setParallelism(4);
+            }
             Properties kafkaProps = new Properties();
             kafkaProps.setProperty("security.protocol", "SASL_SSL");
             kafkaProps.setProperty("sasl.mechanism", "AWS_MSK_IAM");
@@ -118,33 +136,29 @@ public class AnomalyDetection implements Runnable {
             DataStream<Event> enrichedStream = stream
                     .keyBy(Event::getIpDst)
                     .window(SlidingEventTimeWindows.of(Time.hours(1), Time.seconds(1)))
-                    .reduce((e1, e2) -> {
-                        double avgPackets = (e1.getPackets() + e2.getPackets()) / 2.0;
-                        e2.setAvgPackets(avgPackets);
-                        return e2;
-                    });
+                    .aggregate(new AverageAggregate());
 
-            // Define pattern for anomaly detection
-            Pattern<Event, ?> pattern = Pattern.<Event>begin("start")
-                    .where(new SimpleCondition<Event>() {
-                        @Override
-                        public boolean filter(Event event) {
-                            return event.isAnomaly();
-                        }
-                    })
-                    .timesOrMore(20)
-                    .greedy()
-                    .within(Time.minutes(1));
+            Pattern<Event, ?> pattern = Pattern.<Event>begin("start", AfterMatchSkipStrategy.skipPastLastEvent())
+                .where(SimpleCondition.of(event -> event.getPackets() < 10))
+                .times(2, 30)
+                .followedBy("normal")
+                .where(SimpleCondition.of(event -> event.getPackets() > 10))
+                .times(1)
+                .within(Time.minutes(1))
+                .greedy();
 
             // Apply CEP pattern
             PatternStream<Event> patternStream = CEP.pattern(
                     enrichedStream.keyBy(Event::getIpDst), pattern)
-                    .inEventTime();
+                    .inProcessingTime();
+                    //.inEventTime();
 
             // Extract attack results
             DataStream<AttackResult> attackResults = patternStream.select(
                     (Map<String, List<Event>> pattern1) -> {
                         List<Event> events = pattern1.get("start");
+                        // Only enable this when debugging locally.
+                        log.info("Anomalous pattern is found: number of events in a pattern: {}", events.size());
                         Event first = events.get(0);
                         Event last = events.get(events.size() - 1);
                         
@@ -169,7 +183,6 @@ public class AnomalyDetection implements Runnable {
                     });
 
             // Create Kafka sink
-            ObjectMapper objectMapper = new ObjectMapper();
             KafkaSink<AttackResult> sink = KafkaSink.<AttackResult>builder()
                     .setBootstrapServers(sinkBootstrapServer)
                     .setRecordSerializer(KafkaRecordSerializationSchema.builder()
@@ -213,5 +226,41 @@ public class AnomalyDetection implements Runnable {
             value = defaultValue;
         }
         return value;
+    }
+    
+    public static class AverageAggregate implements AggregateFunction<Event, AverageAggregate.Accumulator, Event> {
+        
+        public static class Accumulator {
+            public double sum = 0.0;
+            public int count = 0;
+            public Event lastEvent;
+        }
+        
+        @Override
+        public Accumulator createAccumulator() {
+            return new Accumulator();
+        }
+        
+        @Override
+        public Accumulator add(Event event, Accumulator acc) {
+            acc.sum += event.getPackets();
+            acc.count++;
+            acc.lastEvent = event;
+            return acc;
+        }
+        
+        @Override
+        public Event getResult(Accumulator acc) {
+            double avgPackets = acc.count > 0 ? acc.sum / acc.count : 0.0;
+            acc.lastEvent.setAvgPackets(avgPackets);
+            return acc.lastEvent;
+        }
+        
+        @Override
+        public Accumulator merge(Accumulator acc1, Accumulator acc2) {
+            acc1.sum += acc2.sum;
+            acc1.count += acc2.count;
+            return acc1;
+        }
     }
 }

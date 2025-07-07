@@ -20,7 +20,6 @@ package com.amazonaws.proserve.workshop.process.model;
 
 import java.math.BigInteger;
 import java.time.Instant;
-
 import com.fasterxml.jackson.annotation.JsonProperty;
 import lombok.Builder;
 import lombok.Data;
@@ -56,8 +55,6 @@ public class Event {
     private String writerId;
     @JsonProperty("text")
     private String text;
-    @JsonProperty("event_time")
-    private Instant eventTime;
     @JsonProperty("avg_packets")
     private Double avgPackets;
     
@@ -65,12 +62,11 @@ public class Event {
         return tsStart != null ? Instant.ofEpochMilli(tsStart.longValue()) : null;
     }
     
-    public void setAvgPackets(Double avgPackets) {
-        this.avgPackets = avgPackets;
-    }
-    
     public boolean isAnomaly() {
-        return avgPackets != null && packets != null && 
-               packets < (avgPackets * 0.1);
+        if (avgPackets != null && packets != null && 
+               packets < (avgPackets * 0.1)) {
+                return true;
+               }
+        return false;
     }
 }
