@@ -10,7 +10,7 @@ cd "$(dirname "$0")"
 
 # Compile the project
 echo "Compiling project..."
-mvn compile
+mvn clean package
 
 # Build classpath
 echo "Building classpath..."

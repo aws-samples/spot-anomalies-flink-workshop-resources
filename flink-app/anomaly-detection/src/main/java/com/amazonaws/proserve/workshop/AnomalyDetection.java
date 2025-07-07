@@ -26,24 +26,17 @@ import com.amazonaws.services.kinesisanalytics.runtime.KinesisAnalyticsRuntime;
 import lombok.val;
 import lombok.extern.slf4j.Slf4j;
 
-import org.apache.commons.collections.functors.TruePredicate;
 import org.apache.commons.lang3.StringUtils;
 import org.apache.flink.api.common.functions.AggregateFunction;
 import org.apache.flink.cep.CEP;
 import org.apache.flink.cep.PatternStream;
 import org.apache.flink.cep.nfa.aftermatch.AfterMatchSkipStrategy;
 import org.apache.flink.cep.pattern.Pattern;
-import org.apache.flink.cep.pattern.conditions.IterativeCondition;
 import org.apache.flink.cep.pattern.conditions.SimpleCondition;
 import org.apache.flink.streaming.api.windowing.time.Time;
 import org.apache.flink.streaming.api.windowing.assigners.SlidingEventTimeWindows;
-import org.apache.flink.streaming.api.functions.windowing.ProcessWindowFunction;
-import org.apache.flink.streaming.api.windowing.windows.TimeWindow;
-import org.apache.flink.util.Collector;
 import org.apache.flink.connector.kafka.sink.KafkaSink;
 import org.apache.flink.connector.kafka.sink.KafkaRecordSerializationSchema;
-import org.apache.flink.api.common.serialization.SimpleStringSchema;
-import com.fasterxml.jackson.databind.ObjectMapper;
 import com.amazonaws.proserve.workshop.process.model.AttackResult;
 import java.time.Instant;
 import java.util.List;
@@ -56,10 +49,8 @@ import org.apache.flink.streaming.api.datastream.*;
 import picocli.CommandLine;
 
 import java.io.IOException;
-import java.util.Map;
 import java.util.Properties;
-import org.apache.flink.api.common.functions.AggregateFunction;
-import android.content.Context;
+
 
 /**
  * Entry point class. Defines and parses CLI arguments, instantiate top level
@@ -98,8 +89,11 @@ public class AnomalyDetection implements Runnable {
                 org.apache.flink.configuration.Configuration config = new org.apache.flink.configuration.Configuration();
                 // config.setString("rest.port", "53374");
                 env.configure(config);
-                env.setParallelism(4);
+                env.setParallelism(6);
             }
+            
+            // Disable Kryo serialization, use POJO serialization instead
+            env.getConfig().disableGenericTypes();
             Properties kafkaProps = new Properties();
             kafkaProps.setProperty("security.protocol", "SASL_SSL");
             kafkaProps.setProperty("sasl.mechanism", "AWS_MSK_IAM");
@@ -131,43 +125,36 @@ public class AnomalyDetection implements Runnable {
                     WatermarkStrategy.<Event>forMonotonousTimestamps()
                             .withTimestampAssigner((event, timestamp) -> event.getCalculatedEventTime().toEpochMilli()), 
                     "Source");
-
-            // Calculate rolling average packets per destination IP
-            DataStream<Event> enrichedStream = stream
-                    .keyBy(Event::getIpDst)
-                    .window(SlidingEventTimeWindows.of(Time.hours(1), Time.seconds(1)))
-                    .aggregate(new AverageAggregate());
-
+            
             Pattern<Event, ?> pattern = Pattern.<Event>begin("start", AfterMatchSkipStrategy.skipPastLastEvent())
                 .where(SimpleCondition.of(event -> event.getPackets() < 10))
-                .times(2, 30)
+                .times(10, 30)
                 .followedBy("normal")
                 .where(SimpleCondition.of(event -> event.getPackets() > 10))
                 .times(1)
-                .within(Time.minutes(1))
-                .greedy();
+                .within(Time.minutes(1));
 
             // Apply CEP pattern
             PatternStream<Event> patternStream = CEP.pattern(
-                    enrichedStream.keyBy(Event::getIpDst), pattern)
+                    stream.keyBy(Event::getIpDst), pattern)
                     .inProcessingTime();
-                    //.inEventTime();
 
             // Extract attack results
             DataStream<AttackResult> attackResults = patternStream.select(
                     (Map<String, List<Event>> pattern1) -> {
-                        List<Event> events = pattern1.get("start");
+                        List<Event> aEvents = pattern1.get("start");
+                        List<Event> nEvents = pattern1.get("normal");
                         // Only enable this when debugging locally.
-                        log.info("Anomalous pattern is found: number of events in a pattern: {}", events.size());
-                        Event first = events.get(0);
-                        Event last = events.get(events.size() - 1);
+                        log.info("Anomalous pattern is found: number of events in anomolous pattern: {} normal pattern {}", aEvents.size(), nEvents.size());
+                        Event first = aEvents.get(0);
+                        Event last = aEvents.get(aEvents.size() - 1);
                         
-                        double avgFragmentSize = events.stream()
+                        double avgFragmentSize = aEvents.stream()
                                 .mapToDouble(e -> (double) e.getBytes() / e.getPackets())
                                 .average().orElse(0.0);
                         
-                        double avgPackets = events.stream()
-                                .mapToDouble(Event::getAvgPackets)
+                        double avgPackets = nEvents.stream()
+                                .mapToDouble(e -> (double) e.getPackets())
                                 .average().orElse(0.0);
                         
                         return AttackResult.builder()
@@ -175,7 +162,7 @@ public class AnomalyDetection implements Runnable {
                                 .attackEndTime(Instant.ofEpochMilli(last.getTsEnd().longValue()))
                                 .attackerId(first.getIpSrc())
                                 .targetIp(first.getIpDst())
-                                .fragmentCount((long) events.size())
+                                .fragmentCount((long) aEvents.size())
                                 .avgPackets(avgPackets)
                                 .avgFragmentSize(avgFragmentSize)
                                 .sizeReductionPercent((avgPackets - avgFragmentSize) / avgPackets * 100)
@@ -226,41 +213,5 @@ public class AnomalyDetection implements Runnable {
             value = defaultValue;
         }
         return value;
-    }
-    
-    public static class AverageAggregate implements AggregateFunction<Event, AverageAggregate.Accumulator, Event> {
-        
-        public static class Accumulator {
-            public double sum = 0.0;
-            public int count = 0;
-            public Event lastEvent;
-        }
-        
-        @Override
-        public Accumulator createAccumulator() {
-            return new Accumulator();
-        }
-        
-        @Override
-        public Accumulator add(Event event, Accumulator acc) {
-            acc.sum += event.getPackets();
-            acc.count++;
-            acc.lastEvent = event;
-            return acc;
-        }
-        
-        @Override
-        public Event getResult(Accumulator acc) {
-            double avgPackets = acc.count > 0 ? acc.sum / acc.count : 0.0;
-            acc.lastEvent.setAvgPackets(avgPackets);
-            return acc.lastEvent;
-        }
-        
-        @Override
-        public Accumulator merge(Accumulator acc1, Accumulator acc2) {
-            acc1.sum += acc2.sum;
-            acc1.count += acc2.count;
-            return acc1;
-        }
     }
 }

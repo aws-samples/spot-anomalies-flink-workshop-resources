@@ -55,18 +55,8 @@ public class Event {
     private String writerId;
     @JsonProperty("text")
     private String text;
-    @JsonProperty("avg_packets")
-    private Double avgPackets;
     
     public Instant getCalculatedEventTime() {
         return tsStart != null ? Instant.ofEpochMilli(tsStart.longValue()) : null;
-    }
-    
-    public boolean isAnomaly() {
-        if (avgPackets != null && packets != null && 
-               packets < (avgPackets * 0.1)) {
-                return true;
-               }
-        return false;
     }
 }
