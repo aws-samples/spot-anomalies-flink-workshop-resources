@@ -18,13 +18,34 @@
 
 package com.amazonaws.proserve.workshop;
 
+import com.amazonaws.proserve.workshop.process.model.Event;
+import com.amazonaws.proserve.workshop.serde.JsonDeserializationSchema;
+import com.amazonaws.proserve.workshop.serde.JsonSerializationSchema;
 import com.amazonaws.services.kinesisanalytics.runtime.KinesisAnalyticsRuntime;
 import lombok.extern.slf4j.Slf4j;
 import org.apache.commons.lang3.StringUtils;
-import org.apache.flink.table.api.EnvironmentSettings;
-import org.apache.flink.table.api.bridge.java.StreamStatementSet;
-import org.apache.flink.table.api.bridge.java.StreamTableEnvironment;
+import org.apache.flink.cep.CEP;
+import org.apache.flink.cep.PatternStream;
+import org.apache.flink.cep.pattern.Pattern;
+import org.apache.flink.cep.pattern.conditions.SimpleCondition;
+import org.apache.flink.streaming.api.windowing.time.Time;
+import org.apache.flink.streaming.api.windowing.assigners.SlidingEventTimeWindows;
+import org.apache.flink.streaming.api.functions.windowing.ProcessWindowFunction;
+import org.apache.flink.streaming.api.windowing.windows.TimeWindow;
+import org.apache.flink.util.Collector;
+import org.apache.flink.connector.kafka.sink.KafkaSink;
+import org.apache.flink.connector.kafka.sink.KafkaRecordSerializationSchema;
+import org.apache.flink.api.common.serialization.SimpleStringSchema;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.amazonaws.proserve.workshop.process.model.AttackResult;
+import java.time.Instant;
+import java.util.List;
+import java.util.Map;
 import org.apache.flink.streaming.api.environment.StreamExecutionEnvironment;
+import org.apache.flink.api.common.eventtime.WatermarkStrategy;
+import org.apache.flink.connector.kafka.source.KafkaSource;
+import org.apache.flink.connector.kafka.source.enumerator.initializer.OffsetsInitializer;
+import org.apache.flink.streaming.api.datastream.*;
 import picocli.CommandLine;
 
 import java.io.IOException;
@@ -61,96 +82,106 @@ public class AnomalyDetection implements Runnable {
             String sinkBootstrapServer = getProperty(jobProps, "sinkBootstrapServer", "");
 
             final StreamExecutionEnvironment env = StreamExecutionEnvironment.getExecutionEnvironment();
-            final StreamTableEnvironment tableEnv = StreamTableEnvironment.create(env, EnvironmentSettings.newInstance().build());
+            Properties kafkaProps = new Properties();
+            kafkaProps.setProperty("security.protocol", "SASL_SSL");
+            kafkaProps.setProperty("sasl.mechanism", "AWS_MSK_IAM");
+            kafkaProps.setProperty("sasl.jaas.config", "software.amazon.msk.auth.iam.IAMLoginModule required;");
+            kafkaProps.setProperty("sasl.client.callback.handler.class",
+                    "software.amazon.msk.auth.iam.IAMClientCallbackHandler");
 
-            tableEnv.executeSql("CREATE TABLE log_events_input (\n" +
-                    "event_type VARCHAR,\n" +
-                    "ip_src VARCHAR,\n" +
-                    "ip_dst VARCHAR,\n" +
-                    "timestamp_start BIGINT,\n" +
-                    "timestamp_end BIGINT,\n" +
-                    "writer_id VARCHAR,\n" +
-                    "packets INT,\n" +
-                    "`bytes` INT,\n" +
-                    "`text` VARCHAR,\n" +
-                    "event_time AS TO_TIMESTAMP_LTZ(timestamp_start, 3),\n" +
-                    "WATERMARK FOR event_time AS event_time - INTERVAL '1' SECOND\n" +
-                    ") WITH (\n" +
-                    "'connector'= 'kafka',\n" +
-                    "'topic' = '" + sourceTopic + "',\n" +
-                    "'properties.bootstrap.servers' = '" + sourceBootstrapServer + "',\n" +
-                    "'format'= 'json',\n" +
-                    "'properties.group.id' = 'group-1',\n" +
-                    "'scan.startup.mode' = 'latest-offset',\n" +
-                    "'properties.security.protocol' = 'SASL_SSL',\n" +
-                    "'properties.sasl.mechanism' = 'AWS_MSK_IAM',\n" +
-                    "'properties.sasl.jaas.config' = 'software.amazon.msk.auth.iam.IAMLoginModule required;',\n" +
-                    "'properties.sasl.client.callback.handler.class' = 'software.amazon.msk.auth.iam.IAMClientCallbackHandler'\n" +
-                    ")\n");
 
-            tableEnv.executeSql("CREATE TABLE log_events_output (\n" +
-                    "attack_start_time TIMESTAMP_LTZ(3),\n" +
-                    "attack_end_time TIMESTAMP_LTZ(3),\n" +
-                    "attacker_id VARCHAR,\n" +
-                    "target_ip VARCHAR,\n" +
-                    "fragment_count BIGINT,\n" +
-                    "avg_packets DOUBLE,\n" +
-                    "avg_fragment_size DOUBLE,\n" +
-                    "size_reduction_percent DOUBLE\n" +
-                    ") WITH (\n" +
-                    "'connector'= 'kafka',\n" +
-                    "'topic' = '" + sinkTopic + "',\n" +
-                    "'properties.bootstrap.servers' = '" + sinkBootstrapServer + "',\n" +
-                    "'format'= 'json',\n" +
-                    "'properties.group.id' = 'group-2',\n" +
-                    "'scan.startup.mode' = 'latest-offset',\n" +
-                    "'properties.security.protocol' = 'SASL_SSL',\n" +
-                    "'properties.sasl.mechanism' = 'AWS_MSK_IAM',\n" +
-                    "'properties.sasl.jaas.config' = 'software.amazon.msk.auth.iam.IAMLoginModule required;',\n" +
-                    "'properties.sasl.client.callback.handler.class' = 'software.amazon.msk.auth.iam.IAMClientCallbackHandler'\n" +
-                    ")");
-            StreamStatementSet statementSet = tableEnv.createStatementSet();
-            statementSet.addInsertSql("insert into log_events_output \n" +
-                    "WITH enriched_events AS (\n" +
-                    "SELECT *,\n" +
-                    "           AVG(CAST(packets AS DOUBLE)) OVER (\n" +
-                    "               PARTITION BY ip_dst\n" +
-                    "               ORDER BY event_time \n" +
-                    "               RANGE BETWEEN INTERVAL '1' HOUR PRECEDING AND CURRENT ROW\n" +
-                    "           ) as avg_packets\n" +
-                    "    FROM log_events_input\n" +
-                    ")\n" +
-                    "SELECT \n" +
-                    "        attack_start_time,\n" +
-                    "        attack_end_time,\n" +
-                    "        attacker_ip,\n" +
-                    "        target_ip,\n" +
-                    "        fragment_count,\n" +
-                    "        avg_packets,\n" +
-                    "        avg_fragment_size,\n" +
-                    "        (avg_packets - avg_fragment_size) / avg_packets * 100 as size_reduction_percent\n" +
-                    "    FROM enriched_events\n" +
-                    "    MATCH_RECOGNIZE (\n" +
-                    "        PARTITION BY ip_dst\n" +
-                    "        ORDER BY event_time\n" +
-                    "        MEASURES\n" +
-                    "            FIRST(A.event_time) as attack_start_time,\n" +
-                    "            LAST(TO_TIMESTAMP_LTZ(A.timestamp_end, 3)) as attack_end_time,\n" +
-                    "            FIRST(A.ip_src) as attacker_ip,\n" +
-                    "            FIRST(A.ip_dst) as target_ip,\n" +
-                    "            AVG(A.avg_packets) as avg_packets,\n" +
-                    "            COUNT(*) as fragment_count,\n" +
-                    "            AVG(CAST(A.`bytes` AS DOUBLE) / CAST(A.packets AS DOUBLE)) as avg_fragment_size\n" +
-                    "        ONE ROW PER MATCH\n" +
-                    "        AFTER MATCH SKIP PAST LAST ROW\n" +
-                    "        PATTERN (A{20,} B)\n" +
-                    "        WITHIN INTERVAL '2' MINUTE\n" +
-                    "        DEFINE\n" +
-                    "            A AS (\n" +
-                    "               CAST(A.packets AS DOUBLE) < (A.avg_packets * 0.1)\n" +
-                    "            )\n" +
-                    "    )");
-            statementSet.execute();
+            String initpos = getProperty(jobProps, "initpos", "EARLIEST");
+            OffsetsInitializer startingOffsets;
+            if ("LATEST".equals(initpos)) {
+                startingOffsets = OffsetsInitializer.latest();
+            } else if ("EARLIEST".equals(initpos)) {
+                startingOffsets = OffsetsInitializer.earliest();
+            } else {
+                if (StringUtils.isBlank(initpos)) {
+                    throw new IllegalArgumentException(
+                            "Please set value for initial position to be one of LATEST, EARLIEST or use a timestamp for TIMESTAMP position");
+                }
+                startingOffsets = OffsetsInitializer.timestamp(Long.parseLong(initpos));
+            }
+
+            final KafkaSource<Event> dataSource = KafkaSource.<Event>builder().setProperties(kafkaProps)
+                    .setBootstrapServers(sourceBootstrapServer).setGroupId("AnomalyDetectorApp")
+                    .setTopics(sourceTopic).setStartingOffsets(startingOffsets)
+                    .setValueOnlyDeserializer(JsonDeserializationSchema.forSpecific(Event.class)).build();
+
+            final DataStream<Event> stream = env.fromSource(dataSource, 
+                    WatermarkStrategy.<Event>forMonotonousTimestamps()
+                            .withTimestampAssigner((event, timestamp) -> event.getCalculatedEventTime().toEpochMilli()), 
+                    "Source");
+
+            // Calculate rolling average packets per destination IP
+            DataStream<Event> enrichedStream = stream
+                    .keyBy(Event::getIpDst)
+                    .window(SlidingEventTimeWindows.of(Time.hours(1), Time.seconds(1)))
+                    .reduce((e1, e2) -> {
+                        double avgPackets = (e1.getPackets() + e2.getPackets()) / 2.0;
+                        e2.setAvgPackets(avgPackets);
+                        return e2;
+                    });
+
+            // Define pattern for anomaly detection
+            Pattern<Event, ?> pattern = Pattern.<Event>begin("start")
+                    .where(new SimpleCondition<Event>() {
+                        @Override
+                        public boolean filter(Event event) {
+                            return event.isAnomaly();
+                        }
+                    })
+                    .timesOrMore(20)
+                    .greedy()
+                    .within(Time.minutes(1));
+
+            // Apply CEP pattern
+            PatternStream<Event> patternStream = CEP.pattern(
+                    enrichedStream.keyBy(Event::getIpDst), pattern)
+                    .inEventTime();
+
+            // Extract attack results
+            DataStream<AttackResult> attackResults = patternStream.select(
+                    (Map<String, List<Event>> pattern1) -> {
+                        List<Event> events = pattern1.get("start");
+                        Event first = events.get(0);
+                        Event last = events.get(events.size() - 1);
+                        
+                        double avgFragmentSize = events.stream()
+                                .mapToDouble(e -> (double) e.getBytes() / e.getPackets())
+                                .average().orElse(0.0);
+                        
+                        double avgPackets = events.stream()
+                                .mapToDouble(Event::getAvgPackets)
+                                .average().orElse(0.0);
+                        
+                        return AttackResult.builder()
+                                .attackStartTime(first.getCalculatedEventTime())
+                                .attackEndTime(Instant.ofEpochMilli(last.getTsEnd().longValue()))
+                                .attackerId(first.getIpSrc())
+                                .targetIp(first.getIpDst())
+                                .fragmentCount((long) events.size())
+                                .avgPackets(avgPackets)
+                                .avgFragmentSize(avgFragmentSize)
+                                .sizeReductionPercent((avgPackets - avgFragmentSize) / avgPackets * 100)
+                                .build();
+                    });
+
+            // Create Kafka sink
+            ObjectMapper objectMapper = new ObjectMapper();
+            KafkaSink<AttackResult> sink = KafkaSink.<AttackResult>builder()
+                    .setBootstrapServers(sinkBootstrapServer)
+                    .setRecordSerializer(KafkaRecordSerializationSchema.builder()
+                            .setTopic(sinkTopic)
+                            .setValueSerializationSchema(JsonSerializationSchema.forSpecific(AttackResult.class))
+                            .build())
+                    .setKafkaProducerConfig(kafkaProps)
+                    .build();
+
+            attackResults.sinkTo(sink).name("Sink");
+            
+            env.execute("Anomaly Detection");
         } catch (Exception ex) {
             log.error("Failed to initialize job because of exception: {}, stack: {}", ex, ex.getStackTrace());
             throw new RuntimeException(ex);
@@ -158,22 +189,22 @@ public class AnomalyDetection implements Runnable {
     }
 
     protected static Properties getProps(String propertyGroupId, String configFile) throws IOException {
-        Map<String, Properties> appConfigs;
-
         if (!configFile.isEmpty()) {
             log.debug("Load AppProperties from provided file: {}", configFile);
-            appConfigs = KinesisAnalyticsRuntime.getApplicationProperties(configFile);
+            Properties props = new Properties();
+            try (java.io.FileInputStream fis = new java.io.FileInputStream(configFile)) {
+                props.load(fis);
+            }
+            return props;
         } else {
-            appConfigs = KinesisAnalyticsRuntime.getApplicationProperties();
+            Map<String, Properties> appConfigs = KinesisAnalyticsRuntime.getApplicationProperties();
+            Properties props = appConfigs.get(propertyGroupId);
+            if (props == null || props.isEmpty()) {
+                throw new IllegalArgumentException(
+                        "No such property group found or group have no properties, group id: " + propertyGroupId);
+            }
+            return props;
         }
-
-        Properties props = appConfigs.get(propertyGroupId);
-        if (props == null || props.isEmpty()) {
-            throw new IllegalArgumentException(
-                    "No such property group found or group have no properties, group id: " + propertyGroupId);
-        }
-
-        return props;
     }
 
     protected static String getProperty(Properties properties, String name, String defaultValue) {
