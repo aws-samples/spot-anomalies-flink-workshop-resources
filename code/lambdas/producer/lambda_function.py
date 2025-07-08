@@ -90,7 +90,7 @@ def lambda_handler(event, context):
     target_ip = random.choice(internal_ips)
     fragment_id = random.randint(1000, 9999)
     
-    for frag_num in range(30):
+    for frag_num in range(50):
         current_time_ms = int(time.time() * 1000)
         data = {
             "event_type": random.choice(["GET", "POST", "DELETE"]),

@@ -34,7 +34,6 @@ import org.apache.flink.cep.nfa.aftermatch.AfterMatchSkipStrategy;
 import org.apache.flink.cep.pattern.Pattern;
 import org.apache.flink.cep.pattern.conditions.SimpleCondition;
 import org.apache.flink.streaming.api.windowing.time.Time;
-import org.apache.flink.streaming.api.windowing.assigners.SlidingEventTimeWindows;
 import org.apache.flink.connector.kafka.sink.KafkaSink;
 import org.apache.flink.connector.kafka.sink.KafkaRecordSerializationSchema;
 import com.amazonaws.proserve.workshop.process.model.AttackResult;
@@ -92,8 +91,6 @@ public class AnomalyDetection implements Runnable {
                 env.setParallelism(6);
             }
             
-            // Disable Kryo serialization, use POJO serialization instead
-            env.getConfig().disableGenericTypes();
             Properties kafkaProps = new Properties();
             kafkaProps.setProperty("security.protocol", "SASL_SSL");
             kafkaProps.setProperty("sasl.mechanism", "AWS_MSK_IAM");
