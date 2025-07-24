@@ -344,6 +344,31 @@ class CodeStack(Stack):
             tracing=lambda_.Tracing.ACTIVE,
         )
 
+        lambda_function_fragmentation_attack = lambda_.Function(
+            self,
+            "fragmentation-attack",
+            function_name=f"{Aws.STACK_NAME}-fragmentation-attack",
+            description="Lambda code for generating a fragmentation attack.",
+            architecture=lambda_.Architecture.ARM_64,
+            handler="lambda_handler.lambda_handler",
+            runtime=self.lambda_runtime,
+            code=lambda_.Code.from_asset(
+                path.join(os.getcwd(), LAMBDA_PATH, "fragmentation_attack")
+            ),
+            environment={
+                "POWERTOOLS_SERVICE_NAME": "app-fragmentation",
+                "POWERTOOLS_METRICS_NAMESPACE": f"{Aws.STACK_NAME}-ns",
+                "POWERTOOLS_LOG_LEVEL": APP_LOG_LEVEL,
+                "BOOTSTRAP_SERVER": BOOTSTRAP_SERVER,
+                "TOPIC_NAME": "flow-log-ingest",
+            },
+            layers=[msk_layer],
+            role=producer_role,
+            timeout=Duration.minutes(15),
+            memory_size=2048,
+            tracing=lambda_.Tracing.ACTIVE,
+        )
+
         publish_firehose_function = lambda_.Function(
             self,
             "publish_firehose",
