@@ -407,6 +407,22 @@ class CodeStack(Stack):
             memory_size=512,
         )
 
+        # Add MSK Event Source Mapping
+        msk_cluster_arn = f"arn:aws:kafka:{Aws.REGION}:{Aws.ACCOUNT_ID}:cluster/MSKServerless-{Aws.STACK_NAME}/*"
+        
+        lambda_.EventSourceMapping(
+            self,
+            "AmazonMSKLambdaLLMReportSourceMapping",
+            event_source_arn=msk_cluster_arn,
+            target=lambda_function_summarize,
+            batch_size=1000,
+            enabled=False,
+            maximum_batching_window=Duration.seconds(60),
+            starting_position=lambda_.StartingPosition.TRIM_HORIZON,
+            kafka_consumer_group_id=f"{Aws.STACK_NAME}-llm-report",
+            kafka_topic="flow-log-egress"
+        )
+
 
     def create_lambda_layer(self, layer_name):
         """
