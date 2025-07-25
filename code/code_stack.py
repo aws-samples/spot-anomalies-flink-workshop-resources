@@ -144,6 +144,9 @@ class CodeStack(Stack):
             managed_policies=[
                 iam.ManagedPolicy.from_aws_managed_policy_name(
                     "service-role/AWSLambdaBasicExecutionRole"
+                ),
+                iam.ManagedPolicy.from_aws_managed_policy_name(
+                    "arn:aws:iam::aws:policy/AmazonMSKFullAccess"
                 )
             ],
         )
