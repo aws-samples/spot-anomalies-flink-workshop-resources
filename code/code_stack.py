@@ -40,7 +40,9 @@ class CodeStack(Stack):
         super().__init__(scope, construct_id, **kwargs)
         self.topic_name = "AnomalyReportTopic"
         self.lambda_runtime = lambda_.Runtime.PYTHON_3_12
-        
+        self.msk_cluster_arn = CfnParameter(self, "mskClusterArn", type="String",
+            description="The ARN of the cluster.")
+
         topic = self.get_topic()
         langchain_layer = self.create_lambda_layer("langchain_layer")
         msk_layer = self.create_lambda_layer("msk_layer")
@@ -408,11 +410,10 @@ class CodeStack(Stack):
             memory_size=512,
         )
 
-        # Add MSK Event Source Mapping
         lambda_.EventSourceMapping(
             self,
             "AmazonMSKLambdaLLMReportSourceMapping",
-            event_source_arn=self.node.get_context("mskClusterArn"),
+            event_source_arn=self.msk_cluster_arn.value_as_string,
             target=lambda_function_summarize,
             batch_size=1000,
             enabled=False,
