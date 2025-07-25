@@ -417,10 +417,10 @@ class CodeStack(Stack):
             target=lambda_function_summarize,
             batch_size=1000,
             enabled=False,
-            maximum_batching_window=Duration.seconds(60),
-            starting_position=lambda_.StartingPosition.TRIM_HORIZON,
-            kafka_consumer_group_id=f"{Aws.STACK_NAME}-llm-report",
-            kafka_topic="flow-log-egress"
+            maxBatchingWindow=Duration.seconds(60),
+            startingPosition=lambda_.StartingPosition.TRIM_HORIZON,
+            kafkaConsumerGroupId=f"{Aws.STACK_NAME}-llm-report",
+            kafkaTopic="flow-log-egress"
         )
 
 
