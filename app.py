@@ -12,7 +12,7 @@ app = cdk.App()
 
 appStack = CodeStack(
     app,
-    "msf-anomaly-genai-workshop",
+    "cfn-anomaly-genai-workshop",
     env=cdk.Environment(
         account=os.getenv("CDK_DEFAULT_ACCOUNT"), region=os.getenv("CDK_DEFAULT_REGION")
     ),

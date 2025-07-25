@@ -41,15 +41,6 @@ class CodeStack(Stack):
         self.topic_name = "AnomalyReportTopic"
         self.lambda_runtime = lambda_.Runtime.PYTHON_3_12
         
-        # CDK Parameter for MSK Cluster ARN
-        self.msk_cluster_arn = CfnParameter(
-            self,
-            "MSKClusterArn",
-            type="String",
-            description="ARN of the MSK Serverless cluster",
-            default=f"arn:aws:kafka:{Aws.REGION}:{Aws.ACCOUNT_ID}:cluster/MSKServerless-{Aws.STACK_NAME}/*"
-        )
-
         topic = self.get_topic()
         langchain_layer = self.create_lambda_layer("langchain_layer")
         msk_layer = self.create_lambda_layer("msk_layer")
@@ -421,7 +412,7 @@ class CodeStack(Stack):
         lambda_.EventSourceMapping(
             self,
             "AmazonMSKLambdaLLMReportSourceMapping",
-            event_source_arn=self.msk_cluster_arn.value_as_string,
+            event_source_arn=self.node.get_context("mskClusterArn"),
             target=lambda_function_summarize,
             batch_size=1000,
             enabled=False,
