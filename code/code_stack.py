@@ -40,6 +40,7 @@ class CodeStack(Stack):
         super().__init__(scope, construct_id, **kwargs)
         self.topic_name = "AnomalyReportTopic"
         self.lambda_runtime = lambda_.Runtime.PYTHON_3_12
+        self.lambda_architecture = lambda_.Architecture.X86_64
         self.msk_cluster_arn = CfnParameter(self, "mskClusterArn", type="String",
             description="The ARN of the cluster.")
 
@@ -160,7 +161,7 @@ class CodeStack(Stack):
             "GenerateReportLambda",
             function_name=f"{Aws.STACK_NAME}-generate-report",
             description="Lambda code for generating an incident report.",
-            architecture=lambda_.Architecture.ARM_64,
+            architecture=self.lambda_architecture,
             handler="summarization.lambda_handler",
             runtime=self.lambda_runtime,
             code=lambda_.Code.from_asset(
@@ -328,7 +329,7 @@ class CodeStack(Stack):
             "producer",
             function_name=f"{Aws.STACK_NAME}-producer",
             description="Lambda code for generating an incident report.",
-            architecture=lambda_.Architecture.ARM_64,
+            architecture=self.lambda_architecture,
             handler="lambda_function.lambda_handler",
             runtime=self.lambda_runtime,
             code=lambda_.Code.from_asset(
@@ -355,7 +356,7 @@ class CodeStack(Stack):
             "fragmentation-attack",
             function_name=f"{Aws.STACK_NAME}-fragmentation-attack",
             description="Lambda code for generating a fragmentation attack.",
-            architecture=lambda_.Architecture.ARM_64,
+            architecture=self.lambda_architecture,
             handler="lambda_handler.lambda_handler",
             runtime=self.lambda_runtime,
             code=lambda_.Code.from_asset(
@@ -380,7 +381,7 @@ class CodeStack(Stack):
             "publish_firehose",
             function_name=f"{Aws.STACK_NAME}-firehose-publish",
             description="Lambda code for publishing messages from MSK to Amazon Firehose.",
-            architecture=lambda_.Architecture.ARM_64,
+            architecture=self.lambda_architecture,
             handler="lambda_function.lambda_handler",
             runtime=self.lambda_runtime,
             code=lambda_.Code.from_asset(
@@ -400,7 +401,7 @@ class CodeStack(Stack):
             "firehose_json_parse",
             function_name=f"{Aws.STACK_NAME}-firehose-json-parse",
             description="Lambda code for parsing JSON messages from MSK to Amazon Firehose.",
-            architecture=lambda_.Architecture.ARM_64,
+            architecture=self.lambda_architecture,
             handler="parse_json.lambda_handler",
             runtime=self.lambda_runtime,
             code=lambda_.Code.from_asset(
@@ -437,7 +438,7 @@ class CodeStack(Stack):
             layer_name,
             entry=path.join(os.getcwd(), LAMBDA_PATH, layer_name),
             compatible_runtimes=[self.lambda_runtime],
-            compatible_architectures=[lambda_.Architecture.ARM_64],
+            compatible_architectures=[self.lambda_architecture],
             layer_version_name=layer_name,
         )
 
