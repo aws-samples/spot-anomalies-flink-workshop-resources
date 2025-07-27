@@ -107,6 +107,7 @@ class CodeStack(Stack):
             timeout=Duration.seconds(60),
             code=lambda_.Code.from_inline("""
 import boto3
+import cfnresponse
 def handler(event, context):
     try:
         if event['RequestType'] == 'Delete':
@@ -116,27 +117,22 @@ def handler(event, context):
         response = kafka.describe_cluster_v2(ClusterArn=cluster_arn)
         cluster = response['ClusterInfo']
         brokers_response = kafka.get_bootstrap_brokers(ClusterArn=cluster_arn)
+        bootstrap_address = brokers_response.get('BootstrapBrokerStringSaslIam', '')
         if 'Serverless' in cluster:
             vpc_config = cluster['Serverless']['VpcConfigs'][0]
             ec2 = boto3.client('ec2')
             subnet_response = ec2.describe_subnets(SubnetIds=[vpc_config['SubnetIds'][0]])
             vpc_id = subnet_response['Subnets'][0]['VpcId']
-            return {
-                'Status': 'SUCCESS',
-                'PhysicalResourceId': 'msk-lookup',
-                'Data': {
-                    'VpcId': vpc_id,
-                    'SubnetId': vpc_config['SubnetIds'][0],
-                    'SecurityGroupId': vpc_config['SecurityGroupIds'][0],
-                    'BootstrapBrokers': brokers_response.get('BootstrapBrokerStringSaslIam', '')
-                }
+            response = {
+                'VpcId': vpc_id,
+                'SubnetId': vpc_config['SubnetIds'][0],
+                'SecurityGroupId': vpc_config['SecurityGroupIds'][0],
+                'BootstrapBrokers': bootstrap_address
             }
+            cfnresponse.send(event, context, cfnresponse.SUCCESS, response, event['LogicalResourceId'])
     except Exception as e:
-        return {
-            'Status': 'FAILED',
-            'PhysicalResourceId': 'msk-lookup',
-            'Reason': str(e)
-        }
+        print("Failed getting bootstrap brokers:", e)
+        cfnresponse.send(event, context, cfnresponse.FAILED, response, event['LogicalResourceId'])
 """)
         )
         
