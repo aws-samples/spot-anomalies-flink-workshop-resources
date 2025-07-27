@@ -104,6 +104,7 @@ class CodeStack(Stack):
             runtime=self.lambda_runtime,
             handler="index.handler",
             role=msk_lookup_role,
+            timeout=Duration.seconds(60),
             code=lambda_.Code.from_inline("""
 import boto3
 def handler(event, context):
@@ -142,8 +143,7 @@ def handler(event, context):
         return CustomResource(
             self, "MSKLookup",
             service_token=msk_lookup_lambda.function_arn,
-            properties={'ClusterArn': self.msk_cluster_arn.value_as_string},
-            timeout=Duration.seconds(60)
+            properties={'ClusterArn': self.msk_cluster_arn.value_as_string}
         )
 
     def create_lambda_functions(self, langchain_layer, msk_layer, pandas_layer, topic, msk_lookup):
