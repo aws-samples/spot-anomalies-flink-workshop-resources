@@ -8,8 +8,10 @@ from aws_cdk import (
     Stack,
     Aws,
     CfnParameter,
+    CustomResource,
     aws_iam as iam,
     aws_lambda as lambda_,
+    aws_ec2 as ec2,
 )
 from constructs import Construct
 from aws_cdk.aws_lambda_python_alpha import PythonLayerVersion
@@ -22,11 +24,10 @@ REGION_NAME = Aws.REGION
 ACCOUNT_ID = Aws.ACCOUNT_ID
 APP_LOG_LEVEL = "INFO"
 
-BUCKET_NAME = "msf-anomaly-detection-workshop-producer-s3-bucket"
 LAMBDAS_LAYER_ARN = (
     f"arn:aws:lambda:{REGION_NAME}:336392948345:layer:AWSSDKPandas-Python311"
 )
-BOOTSTRAP_SERVER = "boot-eojc22lr.c2.kafka-serverless.us-east-1.amazonaws.com:9098"
+
 
 
 # AWSSDKPandas-Python311
@@ -39,11 +40,13 @@ class CodeStack(Stack):
     def __init__(self, scope: Construct, construct_id: str, **kwargs) -> None:
         super().__init__(scope, construct_id, **kwargs)
         self.topic_name = "AnomalyReportTopic"
-        self.lambda_runtime = lambda_.Runtime.PYTHON_3_12
-        self.lambda_architecture = lambda_.Architecture.X86_64
+        self.lambda_runtime = lambda_.Runtime.PYTHON_3_11
+        self.lambda_architecture = lambda_.Architecture.ARM_64
         self.msk_cluster_arn = CfnParameter(self, "mskClusterArn", type="String",
-            description="The ARN of the cluster.")
-
+            description="The ARN of the MSK cluster.")
+        
+        # Custom resource to lookup MSK cluster details
+        msk_lookup = self.create_msk_lookup_custom_resource()
         topic = self.get_topic()
         langchain_layer = self.create_lambda_layer("langchain_layer")
         msk_layer = self.create_lambda_layer("msk_layer")
@@ -55,7 +58,7 @@ class CodeStack(Stack):
         )
 
         _ = self.create_lambda_functions(
-            langchain_layer, msk_layer, pandas_layer, topic
+            langchain_layer, msk_layer, pandas_layer, topic, msk_lookup
         )
 
     def get_topic(self):
@@ -81,7 +84,69 @@ class CodeStack(Stack):
 
         return topic
 
-    def create_lambda_functions(self, langchain_layer, msk_layer, pandas_layer, topic):
+    def create_msk_lookup_custom_resource(self):
+        msk_lookup_role = iam.Role(
+            self, "MSKLookupRole",
+            assumed_by=iam.ServicePrincipal("lambda.amazonaws.com"),
+            managed_policies=[
+                iam.ManagedPolicy.from_aws_managed_policy_name("service-role/AWSLambdaBasicExecutionRole")
+            ]
+        )
+        msk_lookup_role.add_to_policy(
+            iam.PolicyStatement(
+                actions=["kafka:DescribeCluster", "kafka:DescribeClusterV2", "kafka:GetBootstrapBrokers", "ec2:DescribeSubnets"],
+                resources=["*"]
+            )
+        )
+        
+        msk_lookup_lambda = lambda_.Function(
+            self, "MSKLookupLambda",
+            runtime=self.lambda_runtime,
+            handler="index.handler",
+            role=msk_lookup_role,
+            code=lambda_.Code.from_inline("""
+import boto3
+def handler(event, context):
+    try:
+        if event['RequestType'] == 'Delete':
+            return {'Status': 'SUCCESS', 'PhysicalResourceId': 'msk-lookup'}
+        cluster_arn = event['ResourceProperties']['ClusterArn']
+        kafka = boto3.client('kafka')
+        response = kafka.describe_cluster_v2(ClusterArn=cluster_arn)
+        cluster = response['ClusterInfo']
+        brokers_response = kafka.get_bootstrap_brokers(ClusterArn=cluster_arn)
+        if 'Serverless' in cluster:
+            vpc_config = cluster['Serverless']['VpcConfigs'][0]
+            ec2 = boto3.client('ec2')
+            subnet_response = ec2.describe_subnets(SubnetIds=[vpc_config['SubnetIds'][0]])
+            vpc_id = subnet_response['Subnets'][0]['VpcId']
+            return {
+                'Status': 'SUCCESS',
+                'PhysicalResourceId': 'msk-lookup',
+                'Data': {
+                    'VpcId': vpc_id,
+                    'SubnetId': vpc_config['SubnetIds'][0],
+                    'SecurityGroupId': vpc_config['SecurityGroupIds'][0],
+                    'BootstrapBrokers': brokers_response.get('BootstrapBrokerStringSaslIam', '')
+                }
+            }
+    except Exception as e:
+        return {
+            'Status': 'FAILED',
+            'PhysicalResourceId': 'msk-lookup',
+            'Reason': str(e)
+        }
+""")
+        )
+        
+        return CustomResource(
+            self, "MSKLookup",
+            service_token=msk_lookup_lambda.function_arn,
+            properties={'ClusterArn': self.msk_cluster_arn.value_as_string},
+            timeout=Duration.seconds(60)
+        )
+
+    def create_lambda_functions(self, langchain_layer, msk_layer, pandas_layer, topic, msk_lookup):
         """
         Create lambda functions
         """
@@ -171,7 +236,7 @@ class CodeStack(Stack):
                 "POWERTOOLS_SERVICE_NAME": "app-summarize",
                 "POWERTOOLS_METRICS_NAMESPACE": f"{Aws.STACK_NAME}-ns",
                 "POWERTOOLS_LOG_LEVEL": APP_LOG_LEVEL,
-                "BOOTSTRAP_SERVER": BOOTSTRAP_SERVER,
+                "BOOTSTRAP_SERVER": msk_lookup.get_att_string("BootstrapBrokers"),
                 "REGION": REGION_NAME,
                 "SNS_TOPIC_ARN": topic.topic_arn,
             },
@@ -339,7 +404,7 @@ class CodeStack(Stack):
                 "POWERTOOLS_SERVICE_NAME": "app-summarize",
                 "POWERTOOLS_METRICS_NAMESPACE": f"{Aws.STACK_NAME}-ns",
                 "POWERTOOLS_LOG_LEVEL": APP_LOG_LEVEL,
-                "BOOTSTRAP_SERVER": BOOTSTRAP_SERVER,
+                "BOOTSTRAP_SERVER": msk_lookup.get_att_string("BootstrapBrokers"),
                 "CY": "1",
                 "MESSAGE_COUNT": "1000",
                 "TOPIC_NAME": "flow-log-ingest",
@@ -366,7 +431,7 @@ class CodeStack(Stack):
                 "POWERTOOLS_SERVICE_NAME": "app-fragmentation",
                 "POWERTOOLS_METRICS_NAMESPACE": f"{Aws.STACK_NAME}-ns",
                 "POWERTOOLS_LOG_LEVEL": APP_LOG_LEVEL,
-                "BOOTSTRAP_SERVER": BOOTSTRAP_SERVER,
+                "BOOTSTRAP_SERVER": msk_lookup.get_att_string("BootstrapBrokers"),
                 "TOPIC_NAME": "flow-log-ingest",
             },
             layers=[msk_layer],
@@ -374,6 +439,9 @@ class CodeStack(Stack):
             timeout=Duration.minutes(15),
             memory_size=2048,
             tracing=lambda_.Tracing.ACTIVE,
+            vpc=ec2.Vpc.from_vpc_attributes(self, "MSKVpc", vpc_id=msk_lookup.get_att_string("VpcId"), availability_zones=[f"{REGION_NAME}a", f"{REGION_NAME}b"]),
+            vpc_subnets=ec2.SubnetSelection(subnets=[ec2.Subnet.from_subnet_id(self, "MSKSubnet", msk_lookup.get_att_string("SubnetId"))]),
+            security_groups=[ec2.SecurityGroup.from_security_group_id(self, "MSKSecurityGroup", msk_lookup.get_att_string("SecurityGroupId"))]
         )
 
         publish_firehose_function = lambda_.Function(
