@@ -18,27 +18,38 @@
 
 package com.amazonaws.proserve.workshop;
 
-import com.amazonaws.proserve.workshop.process.AsyncPrediction;
-import com.amazonaws.proserve.workshop.process.EventsAggregator;
-import com.amazonaws.proserve.workshop.serde.JsonDeserializationSchema;
 import com.amazonaws.proserve.workshop.process.model.Event;
+import com.amazonaws.proserve.workshop.serde.JsonDeserializationSchema;
 import com.amazonaws.proserve.workshop.serde.JsonSerializationSchema;
 import com.amazonaws.services.kinesisanalytics.runtime.KinesisAnalyticsRuntime;
+
+import lombok.val;
 import lombok.extern.slf4j.Slf4j;
+
 import org.apache.commons.lang3.StringUtils;
-import org.apache.flink.api.common.eventtime.WatermarkStrategy;
-import org.apache.flink.connector.kafka.sink.KafkaRecordSerializationSchema;
+import org.apache.flink.api.common.functions.AggregateFunction;
+import org.apache.flink.cep.CEP;
+import org.apache.flink.cep.PatternStream;
+import org.apache.flink.cep.nfa.aftermatch.AfterMatchSkipStrategy;
+import org.apache.flink.cep.pattern.Pattern;
+import org.apache.flink.cep.pattern.conditions.SimpleCondition;
+import org.apache.flink.streaming.api.windowing.time.Time;
 import org.apache.flink.connector.kafka.sink.KafkaSink;
+import org.apache.flink.connector.kafka.sink.KafkaRecordSerializationSchema;
+import com.amazonaws.proserve.workshop.process.model.AttackResult;
+import java.time.Instant;
+import java.util.List;
+import java.util.Map;
+import org.apache.flink.streaming.api.environment.StreamExecutionEnvironment;
+import org.apache.flink.api.common.eventtime.WatermarkStrategy;
 import org.apache.flink.connector.kafka.source.KafkaSource;
 import org.apache.flink.connector.kafka.source.enumerator.initializer.OffsetsInitializer;
 import org.apache.flink.streaming.api.datastream.*;
-import org.apache.flink.streaming.api.environment.StreamExecutionEnvironment;
 import picocli.CommandLine;
 
 import java.io.IOException;
-import java.util.Map;
 import java.util.Properties;
-import java.util.concurrent.TimeUnit;
+
 
 /**
  * Entry point class. Defines and parses CLI arguments, instantiate top level
@@ -61,6 +72,25 @@ public class AnomalyDetection implements Runnable {
     @Override
     public void run() {
         try {
+
+            Properties jobProps = getProps(propertyGroupId, propertyFile);
+
+            String sourceTopic = getProperty(jobProps, "sourceTopic", "");
+            String sourceBootstrapServer = getProperty(jobProps, "sourceBootstrapServer", "");
+            String sinkTopic = getProperty(jobProps, "sinkTopic", "");
+            String sinkBootstrapServer = getProperty(jobProps, "sinkBootstrapServer", "");
+            log.info("Flink Job properties map: sourceTopic {} sinkTopic {} sourceBootstrapServer {} sinkBootstrapServer {}", sourceTopic,  sinkTopic, sourceBootstrapServer, sinkBootstrapServer);
+
+            final StreamExecutionEnvironment env = StreamExecutionEnvironment.getExecutionEnvironment();
+            
+            // Configure Flink web dashboard port for local environment only
+            if (env instanceof org.apache.flink.streaming.api.environment.LocalStreamEnvironment) {
+                org.apache.flink.configuration.Configuration config = new org.apache.flink.configuration.Configuration();
+                // config.setString("rest.port", "53374");
+                env.configure(config);
+                env.setParallelism(6);
+            }
+            
             Properties kafkaProps = new Properties();
             kafkaProps.setProperty("security.protocol", "SASL_SSL");
             kafkaProps.setProperty("sasl.mechanism", "AWS_MSK_IAM");
@@ -68,7 +98,6 @@ public class AnomalyDetection implements Runnable {
             kafkaProps.setProperty("sasl.client.callback.handler.class",
                     "software.amazon.msk.auth.iam.IAMClientCallbackHandler");
 
-            Properties jobProps = getProps(propertyGroupId, propertyFile);
 
             String initpos = getProperty(jobProps, "initpos", "EARLIEST");
             OffsetsInitializer startingOffsets;
@@ -84,34 +113,72 @@ public class AnomalyDetection implements Runnable {
                 startingOffsets = OffsetsInitializer.timestamp(Long.parseLong(initpos));
             }
 
-            String sourceTopic = getProperty(jobProps, "sourceTopic", "");
-            String sourceBootstrapServer = getProperty(jobProps, "sourceBootstrapServer", "");
             final KafkaSource<Event> dataSource = KafkaSource.<Event>builder().setProperties(kafkaProps)
                     .setBootstrapServers(sourceBootstrapServer).setGroupId("AnomalyDetectorApp")
                     .setTopics(sourceTopic).setStartingOffsets(startingOffsets)
                     .setValueOnlyDeserializer(JsonDeserializationSchema.forSpecific(Event.class)).build();
 
-            final StreamExecutionEnvironment env = StreamExecutionEnvironment.getExecutionEnvironment();
-            final DataStream<Event> stream = env.fromSource(dataSource, WatermarkStrategy.noWatermarks(), "Source");
+            final DataStream<Event> stream = env.fromSource(dataSource, 
+                    WatermarkStrategy.<Event>forMonotonousTimestamps()
+                            .withTimestampAssigner((event, timestamp) -> event.getCalculatedEventTime().toEpochMilli()), 
+                    "Source");
+            
+            Pattern<Event, ?> pattern = Pattern.<Event>begin("start", AfterMatchSkipStrategy.skipPastLastEvent())
+                .where(SimpleCondition.of(event -> event.getPackets() < 10))
+                .times(10, 30)
+                .followedBy("normal")
+                .where(SimpleCondition.of(event -> event.getPackets() > 10))
+                .times(1)
+                .within(Time.minutes(1));
 
-            String sageMakerEndpoint = getProperty(jobProps, "sagemakerEndpoint", "");
-            double threshold = getProperty(jobProps, "threshold", 3.0);
-            int maxEvents = getProperty(jobProps, "maxEvents", 100);
-            int freqSecs = getProperty(jobProps, "freqSecs", 5);
-            DataStream<Event> predictions = AsyncDataStream.unorderedWait(
-                    stream.keyBy(Event::getWriterId).process(new EventsAggregator(maxEvents, freqSecs)),
-                    new AsyncPrediction(sageMakerEndpoint, threshold), 10_000, TimeUnit.MILLISECONDS, 100);
+            // Apply CEP pattern
+            PatternStream<Event> patternStream = CEP.pattern(
+                    stream.keyBy(Event::getIpDst), pattern)
+                    .inProcessingTime();
 
-            String sinkTopic = getProperty(jobProps, "sinkTopic", "");
-            String sinkBootstrapServer = getProperty(jobProps, "sinkBootstrapServer", "");
-            KafkaSink<Event> sink = KafkaSink.<Event>builder().setKafkaProducerConfig(kafkaProps)
+            // Extract attack results
+            DataStream<AttackResult> attackResults = patternStream.select(
+                    (Map<String, List<Event>> pattern1) -> {
+                        List<Event> aEvents = pattern1.get("start");
+                        List<Event> nEvents = pattern1.get("normal");
+                        // Only enable this when debugging locally.
+                        log.info("Anomalous pattern is found: number of events in anomolous pattern: {} normal pattern {}", aEvents.size(), nEvents.size());
+                        Event first = aEvents.get(0);
+                        Event last = aEvents.get(aEvents.size() - 1);
+                        
+                        double avgFragmentSize = aEvents.stream()
+                                .mapToDouble(e -> (double) e.getBytes() / e.getPackets())
+                                .average().orElse(0.0);
+                        
+                        double avgPackets = nEvents.stream()
+                                .mapToDouble(e -> (double) e.getPackets())
+                                .average().orElse(0.0);
+                        
+                        return AttackResult.builder()
+                                .attackStartTime(first.getCalculatedEventTime())
+                                .attackEndTime(Instant.ofEpochMilli(last.getTsEnd().longValue()))
+                                .attackerId(first.getIpSrc())
+                                .targetIp(first.getIpDst())
+                                .fragmentCount((long) aEvents.size())
+                                .avgPackets(avgPackets)
+                                .avgFragmentSize(avgFragmentSize)
+                                .sizeReductionPercent((avgPackets - avgFragmentSize) / avgPackets * 100)
+                                .build();
+                    });
+
+            // Create Kafka sink
+            KafkaSink<AttackResult> sink = KafkaSink.<AttackResult>builder()
                     .setBootstrapServers(sinkBootstrapServer)
-                    .setRecordSerializer(KafkaRecordSerializationSchema.builder().setTopic(sinkTopic)
-                            .setValueSerializationSchema(JsonSerializationSchema.forSpecific(Event.class)).build())
+                    .setRecordSerializer(KafkaRecordSerializationSchema.builder()
+                            .setTopic(sinkTopic)
+                            .setValueSerializationSchema(JsonSerializationSchema.forSpecific(AttackResult.class))
+                            .build())
+                    .setKafkaProducerConfig(kafkaProps)
                     .build();
-            predictions.sinkTo(sink).name("Sink");
 
-            env.execute();
+            attackResults.sinkTo(sink).name("Sink");
+            
+            env.execute("Anomaly Detection");
         } catch (Exception ex) {
             log.error("Failed to initialize job because of exception: {}, stack: {}", ex, ex.getStackTrace());
             throw new RuntimeException(ex);
@@ -119,22 +186,22 @@ public class AnomalyDetection implements Runnable {
     }
 
     protected static Properties getProps(String propertyGroupId, String configFile) throws IOException {
-        Map<String, Properties> appConfigs;
-
         if (!configFile.isEmpty()) {
             log.debug("Load AppProperties from provided file: {}", configFile);
-            appConfigs = KinesisAnalyticsRuntime.getApplicationProperties(configFile);
+            Properties props = new Properties();
+            try (java.io.FileInputStream fis = new java.io.FileInputStream(configFile)) {
+                props.load(fis);
+            }
+            return props;
         } else {
-            appConfigs = KinesisAnalyticsRuntime.getApplicationProperties();
+            Map<String, Properties> appConfigs = KinesisAnalyticsRuntime.getApplicationProperties();
+            Properties props = appConfigs.get(propertyGroupId);
+            if (props == null || props.isEmpty()) {
+                throw new IllegalArgumentException(
+                        "No such property group found or group have no properties, group id: " + propertyGroupId);
+            }
+            return props;
         }
-
-        Properties props = appConfigs.get(propertyGroupId);
-        if (props == null || props.isEmpty()) {
-            throw new IllegalArgumentException(
-                    "No such property group found or group have no properties, group id: " + propertyGroupId);
-        }
-
-        return props;
     }
 
     protected static String getProperty(Properties properties, String name, String defaultValue) {
@@ -143,29 +210,5 @@ public class AnomalyDetection implements Runnable {
             value = defaultValue;
         }
         return value;
-    }
-
-    protected static double getProperty(Properties properties, String name, double defaultValue) {
-        String value = properties.getProperty(name);
-        if (StringUtils.isBlank(value)) {
-            return defaultValue;
-        }
-        try {
-            return Double.parseDouble(value);
-        } catch (NumberFormatException e) {
-            return defaultValue;
-        }
-    }
-
-    protected static int getProperty(Properties properties, String name, int defaultValue) {
-        String value = properties.getProperty(name);
-        if (StringUtils.isBlank(value)) {
-            return defaultValue;
-        }
-        try {
-            return Integer.parseInt(value);
-        } catch (NumberFormatException e) {
-            return defaultValue;
-        }
     }
 }
