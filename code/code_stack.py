@@ -12,6 +12,8 @@ from aws_cdk import (
     aws_iam as iam,
     aws_lambda as lambda_,
     aws_ec2 as ec2,
+    aws_events as events,
+    aws_events_targets as targets,
 )
 from constructs import Construct
 from aws_cdk.aws_lambda_python_alpha import PythonLayerVersion
@@ -27,8 +29,6 @@ APP_LOG_LEVEL = "INFO"
 LAMBDAS_LAYER_ARN = (
     f"arn:aws:lambda:{REGION_NAME}:336392948345:layer:AWSSDKPandas-Python311"
 )
-
-
 
 # AWSSDKPandas-Python311
 # arn:aws:lambda:us-east-1:336392948345:layer:AWSSDKPandas-Python311:10
@@ -489,6 +489,23 @@ def handler(event, context):
             starting_position=lambda_.StartingPosition.TRIM_HORIZON,
             kafka_consumer_group_id=f"{Aws.STACK_NAME}-llm-report",
             kafka_topic="flow-log-egress"
+        )
+
+        # EventBridge rule to trigger fragmentation-attack lambda every 2 minutes
+        fragmentation_rule = events.Rule(
+            self,
+            "FragmentationAttackRule",
+            schedule=events.Schedule.rate(Duration.minutes(2)),
+            enabled=False
+        )
+        
+        fragmentation_rule.add_target(targets.LambdaFunction(lambda_function_fragmentation_attack))
+        
+        # Grant EventBridge permission to invoke the lambda
+        lambda_function_fragmentation_attack.add_permission(
+            "AllowEventBridge",
+            principal=iam.ServicePrincipal("events.amazonaws.com"),
+            source_arn=fragmentation_rule.rule_arn
         )
 
 
