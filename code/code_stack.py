@@ -385,33 +385,6 @@ def handler(event, context):
             iam.PolicyStatement(actions=["sns:Publish"], resources=["*"])
         )
 
-        lambda_function_producer = lambda_.Function(
-            self,
-            "producer",
-            function_name=f"{Aws.STACK_NAME}-producer",
-            description="Lambda code for generating an incident report.",
-            architecture=self.lambda_architecture,
-            handler="lambda_function.lambda_handler",
-            runtime=self.lambda_runtime,
-            code=lambda_.Code.from_asset(
-                path.join(os.getcwd(), LAMBDA_PATH, "producer")
-            ),
-            environment={
-                "POWERTOOLS_SERVICE_NAME": "app-summarize",
-                "POWERTOOLS_METRICS_NAMESPACE": f"{Aws.STACK_NAME}-ns",
-                "POWERTOOLS_LOG_LEVEL": APP_LOG_LEVEL,
-                "BOOTSTRAP_SERVER": msk_lookup.get_att_string("BootstrapBrokers"),
-                "CY": "1",
-                "MESSAGE_COUNT": "1000",
-                "TOPIC_NAME": "flow-log-ingest",
-            },
-            layers=[pandas_layer, msk_layer],
-            role=producer_role,
-            timeout=Duration.minutes(15),
-            memory_size=2048,
-            tracing=lambda_.Tracing.ACTIVE,
-        )
-
         lambda_function_fragmentation_attack = lambda_.Function(
             self,
             "fragmentation-attack",
@@ -438,26 +411,6 @@ def handler(event, context):
             vpc=ec2.Vpc.from_vpc_attributes(self, "MSKVpc", vpc_id=msk_lookup.get_att_string("VpcId"), availability_zones=[f"{REGION_NAME}a", f"{REGION_NAME}b"]),
             vpc_subnets=ec2.SubnetSelection(subnets=[ec2.Subnet.from_subnet_id(self, "MSKSubnet", msk_lookup.get_att_string("SubnetId"))]),
             security_groups=[ec2.SecurityGroup.from_security_group_id(self, "MSKSecurityGroup", msk_lookup.get_att_string("SecurityGroupId"))]
-        )
-
-        publish_firehose_function = lambda_.Function(
-            self,
-            "publish_firehose",
-            function_name=f"{Aws.STACK_NAME}-firehose-publish",
-            description="Lambda code for publishing messages from MSK to Amazon Firehose.",
-            architecture=self.lambda_architecture,
-            handler="lambda_function.lambda_handler",
-            runtime=self.lambda_runtime,
-            code=lambda_.Code.from_asset(
-                path.join(os.getcwd(), LAMBDA_PATH, "publish_firehose")
-            ),
-            environment={
-                "FIREHOSE_STREAM_NAME": "splunk-sink-pipeline",
-            },
-            layers=[],
-            role=publish_firehose_role,
-            timeout=Duration.minutes(15),
-            memory_size=2048,
         )
 
         firehose_json_parse_function = lambda_.Function(
