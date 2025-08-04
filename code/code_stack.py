@@ -39,7 +39,7 @@ class CodeStack(Stack):
 
     def __init__(self, scope: Construct, construct_id: str, **kwargs) -> None:
         super().__init__(scope, construct_id, **kwargs)
-        self.topic_name = "AnomalyReportTopic"
+        self.topic_name = "AnomalyReportSNSTopic"
         self.lambda_runtime = lambda_.Runtime.PYTHON_3_11
         self.lambda_architecture = lambda_.Architecture.ARM_64
         self.msk_cluster_arn = CfnParameter(self, "mskClusterArn", type="String",
@@ -48,40 +48,25 @@ class CodeStack(Stack):
         # Custom resource to lookup MSK cluster details
         msk_lookup = self.create_msk_lookup_custom_resource()
         topic = self.get_topic()
-        langchain_layer = self.create_lambda_layer("langchain_layer")
         msk_layer = self.create_lambda_layer("msk_layer")
         LAMBDAS_LAYER_ARN: str = (
-            f"arn:aws:lambda:{Aws.REGION}:017000801446:layer:AWSLambdaPowertoolsPythonV2:67"
+            f"arn:aws:lambda:{Aws.REGION}:017000801446:layer:AWSLambdaPowertoolsPythonV2:68"
         )
         pandas_layer = lambda_.LayerVersion.from_layer_version_arn(
             self, id="PandasLayer", layer_version_arn=LAMBDAS_LAYER_ARN
         )
 
         _ = self.create_lambda_functions(
-            langchain_layer, msk_layer, pandas_layer, topic, msk_lookup
+            msk_layer, pandas_layer, topic, msk_lookup
         )
 
     def get_topic(self):
-        topic = sns.Topic(
+        # Use existing SNS topic created by workshop CFN
+        topic = sns.Topic.from_topic_arn(
             self,
             self.topic_name,
-            display_name=self.topic_name,
-            master_key=kms.Alias.from_alias_name(
-                self, "DefaultKey", "alias/aws/sns"
-            ),  # Use the default KMS key for SNS
+            topic_arn=f"arn:aws:sns:{REGION_NAME}:{ACCOUNT_ID}:{self.topic_name}"
         )
-
-        # Add a policy to require SSL for publishing messages
-        topic.add_to_resource_policy(
-            iam.PolicyStatement(
-                effect=iam.Effect.DENY,
-                actions=["sns:Publish"],
-                principals=[iam.AnyPrincipal()],
-                resources=[topic.topic_arn],
-                conditions={"Bool": {"aws:SecureTransport": "false"}},
-            )
-        )
-
         return topic
 
     def create_msk_lookup_custom_resource(self):
@@ -142,7 +127,7 @@ def handler(event, context):
             properties={'ClusterArn': self.msk_cluster_arn.value_as_string}
         )
 
-    def create_lambda_functions(self, langchain_layer, msk_layer, pandas_layer, topic, msk_lookup):
+    def create_lambda_functions(self, msk_layer, pandas_layer, topic, msk_lookup):
         """
         Create lambda functions
         """
@@ -154,8 +139,7 @@ def handler(event, context):
             statements=[
                 iam.PolicyStatement(
                     actions=["bedrock:*"],
-                    resources=[
-                        f"arn:aws:bedrock:{Aws.REGION}::foundation-model/*"],
+                    resources=["*"],
                     effect=iam.Effect.ALLOW,
                 )
             ],
@@ -199,50 +183,6 @@ def handler(event, context):
             ],
         )
 
-        lambda_role = iam.Role(
-            self,
-            "LambdaRole",
-            assumed_by=iam.ServicePrincipal("lambda.amazonaws.com"),
-            managed_policies=[
-                iam.ManagedPolicy.from_aws_managed_policy_name(
-                    "service-role/AWSLambdaBasicExecutionRole"
-                ),
-                iam.ManagedPolicy.from_aws_managed_policy_name(
-                    "AmazonMSKFullAccess"
-                )
-            ],
-        )
-        lambda_role.attach_inline_policy(bedrock_policy)
-        lambda_role.attach_inline_policy(s3_policy)
-        lambda_role.attach_inline_policy(xray_policy)
-        lambda_role.attach_inline_policy(sns_policy)
-
-        lambda_function_summarize = lambda_.Function(
-            self,
-            "GenerateReportLambda",
-            function_name=f"{Aws.STACK_NAME}-generate-report",
-            description="Lambda code for generating an incident report.",
-            architecture=self.lambda_architecture,
-            handler="summarization.lambda_handler",
-            runtime=self.lambda_runtime,
-            code=lambda_.Code.from_asset(
-                path.join(os.getcwd(), LAMBDA_PATH, "generate_report")
-            ),
-            environment={
-                "POWERTOOLS_SERVICE_NAME": "app-summarize",
-                "POWERTOOLS_METRICS_NAMESPACE": f"{Aws.STACK_NAME}-ns",
-                "POWERTOOLS_LOG_LEVEL": APP_LOG_LEVEL,
-                "BOOTSTRAP_SERVER": msk_lookup.get_att_string("BootstrapBrokers"),
-                "REGION": REGION_NAME,
-                "SNS_TOPIC_ARN": topic.topic_arn,
-            },
-            layers=[langchain_layer, msk_layer],
-            role=lambda_role,
-            timeout=Duration.minutes(15),
-            memory_size=2048,
-            tracing=lambda_.Tracing.ACTIVE,
-        )
-
         publish_firehose_role = iam.Role(
             self,
             "PublishFirehoseRole",
@@ -271,7 +211,7 @@ def handler(event, context):
                 actions=["s3:*", "s3-object-lambda:*"], resources=["*"])
         )
 
-        # Policy 2: Log        # Policy 2: Log
+        # Policy 2: Logs permissions
         producer_role.add_to_policy(
             iam.PolicyStatement(
                 actions=["logs:CreateLogGroup"],
@@ -431,19 +371,6 @@ def handler(event, context):
             memory_size=512,
         )
 
-        lambda_.EventSourceMapping(
-            self,
-            "AmazonMSKLambdaLLMReportSourceMapping",
-            event_source_arn=self.msk_cluster_arn.value_as_string,
-            target=lambda_function_summarize,
-            batch_size=1000,
-            enabled=False,
-            max_batching_window=Duration.seconds(60),
-            starting_position=lambda_.StartingPosition.TRIM_HORIZON,
-            kafka_consumer_group_id=f"{Aws.STACK_NAME}-llm-report",
-            kafka_topic="flow-log-egress"
-        )
-
         # EventBridge rule to trigger fragmentation-attack lambda every 2 minutes
         fragmentation_rule = events.Rule(
             self,
@@ -461,6 +388,117 @@ def handler(event, context):
             source_arn=fragmentation_rule.rule_arn
         )
 
+        # Bedrock agent permissions for new lambdas
+        bedrock_agent_policy = iam.Policy(
+            self,
+            "BedrockAgentPolicy",
+            policy_name="BedrockAgentAccessPolicy",
+            statements=[
+                iam.PolicyStatement(
+                    actions=["bedrock:InvokeAgent"],
+                    resources=["*"],
+                    effect=iam.Effect.ALLOW,
+                )
+            ],
+        )
+
+        # Role for agent action group lambda
+        agent_action_role = iam.Role(
+            self,
+            "AgentActionRole",
+            assumed_by=iam.ServicePrincipal("lambda.amazonaws.com"),
+            managed_policies=[
+                iam.ManagedPolicy.from_aws_managed_policy_name(
+                    "service-role/AWSLambdaBasicExecutionRole"
+                )
+            ],
+        )
+        agent_action_role.attach_inline_policy(bedrock_policy)
+        agent_action_role.attach_inline_policy(sns_policy)
+        
+        # Add KMS permissions for SNS topic encryption
+        agent_action_role.add_to_policy(
+            iam.PolicyStatement(
+                actions=[
+                    "kms:GenerateDataKey",
+                    "kms:Decrypt"
+                ],
+                resources=["*"]
+            )
+        )
+
+        # Attach Bedrock agent policy to producer role for invoke agent lambda
+        producer_role.attach_inline_policy(bedrock_agent_policy)
+
+        # Agent action group lambda
+        agent_action_group_function = lambda_.Function(
+            self,
+            "AgentActionGroupLambda",
+            function_name="SecurityTools-agent-action-group",
+            description="Lambda function for Bedrock agent action group.",
+            architecture=self.lambda_architecture,
+            handler="action_group.lambda_handler",
+            runtime=self.lambda_runtime,
+            code=lambda_.Code.from_asset(
+                path.join(os.getcwd(), LAMBDA_PATH, "agent_action_group")
+            ),
+            environment={
+                "TOPIC_ARN": topic.topic_arn,
+                "REGION_NAME": REGION_NAME,
+            },
+            role=agent_action_role,
+            timeout=Duration.minutes(5),
+            memory_size=1024,
+            tracing=lambda_.Tracing.ACTIVE,
+        )
+        
+        # Allow Bedrock to invoke the agent action group lambda
+        agent_action_group_function.add_permission(
+            "AllowBedrock",
+            principal=iam.ServicePrincipal("bedrock.amazonaws.com"),
+            action="lambda:InvokeFunction"
+        )
+
+        # Invoke agent lambda (replaces GenerateReportLambda)
+        invoke_agent_function = lambda_.Function(
+            self,
+            "InvokeAgentLambda",
+            function_name=f"{Aws.STACK_NAME}-invoke-agent",
+            description="Lambda function to invoke Bedrock agent for anomaly analysis.",
+            architecture=self.lambda_architecture,
+            handler="summarization.lambda_handler",
+            runtime=self.lambda_runtime,
+            code=lambda_.Code.from_asset(
+                path.join(os.getcwd(), LAMBDA_PATH, "invoke_agent")
+            ),
+            environment={
+                "POWERTOOLS_SERVICE_NAME": "invoke-agent",
+                "POWERTOOLS_METRICS_NAMESPACE": f"{Aws.STACK_NAME}-ns",
+                "POWERTOOLS_LOG_LEVEL": APP_LOG_LEVEL,
+                "AGENT_ID": "PLACEHOLDER_AGENT_ID",
+                "AGENT_ALIAS_ID": "PLACEHOLDER_AGENT_ALIAS_ID",
+                "REGION_NAME": REGION_NAME,
+            },
+            layers=[pandas_layer],
+            role=producer_role,
+            timeout=Duration.minutes(10),
+            memory_size=1024,
+            tracing=lambda_.Tracing.ACTIVE,
+        )
+
+        # MSK Event Source Mapping - now targets invoke_agent_function instead of generate_report
+        lambda_.EventSourceMapping(
+            self,
+            "AmazonMSKLambdaLLMReportSourceMapping",
+            event_source_arn=self.msk_cluster_arn.value_as_string,
+            target=invoke_agent_function,
+            batch_size=1000,
+            enabled=False,
+            max_batching_window=Duration.seconds(60),
+            starting_position=lambda_.StartingPosition.TRIM_HORIZON,
+            kafka_consumer_group_id=f"{Aws.STACK_NAME}-llm-report",
+            kafka_topic="flow-log-egress"
+        )
 
     def create_lambda_layer(self, layer_name):
         """
