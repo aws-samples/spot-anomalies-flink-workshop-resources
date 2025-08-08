@@ -76,8 +76,25 @@ def lambda_handler(event, context):
                 # Remove newlines that are outside of string values
                 content = re.sub(r'\n(?=\s*[{}\[\],:])', '', content)
                 content = re.sub(r'\n(?=\s*$)', '', content)
-                # Escape newlines that are inside string values
-                content = re.sub(r'(?<="[^"]*?)\n(?=[^"]*?")', '\\n', content)
+                
+                # Replace newlines inside JSON string values with escaped newlines
+                def escape_newlines_in_strings(text):
+                    result = []
+                    in_string = False
+                    i = 0
+                    while i < len(text):
+                        char = text[i]
+                        if char == '"' and (i == 0 or text[i-1] != '\\'):
+                            in_string = not in_string
+                        elif char == '\n' and in_string:
+                            result.append('\\n')
+                            i += 1
+                            continue
+                        result.append(char)
+                        i += 1
+                    return ''.join(result)
+                
+                content = escape_newlines_in_strings(content)
                 
                 print(f"Cleaned content for JSON parsing: '{content}'")
                 print(f"Content bytes: {content.encode('utf-8')}")
