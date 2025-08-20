@@ -18,6 +18,8 @@
 
 package com.amazonaws.proserve.workshop.process.model;
 
+import java.math.BigInteger;
+import java.time.Instant;
 import com.fasterxml.jackson.annotation.JsonProperty;
 import lombok.Builder;
 import lombok.Data;
@@ -42,9 +44,9 @@ public class Event {
     @JsonProperty("ip_proto")
     private String ipProto;
     @JsonProperty("timestamp_start")
-    private String tsStart;
+    private BigInteger tsStart;
     @JsonProperty("timestamp_end")
-    private String tsEnd;
+    private BigInteger tsEnd;
     @JsonProperty("packets")
     private Integer packets;
     @JsonProperty("bytes")
@@ -53,8 +55,8 @@ public class Event {
     private String writerId;
     @JsonProperty("text")
     private String text;
-    @JsonProperty("fraud")
-    private boolean fraud;
-    @JsonProperty("dot_product")
-    private Double dotProduct;
+    
+    public Instant getCalculatedEventTime() {
+        return tsStart != null ? Instant.ofEpochMilli(tsStart.longValue()) : null;
+    }
 }
