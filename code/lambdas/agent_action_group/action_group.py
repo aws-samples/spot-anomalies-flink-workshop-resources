@@ -32,31 +32,29 @@ def lambda_handler(event, context):
             sanitized_data = sanitized_data.replace('Attack', 'Event')
             
             prompt = f"{SYSTEM_PROMPT}\n\n{SUMMARIZATION_TEMPLATE_PARAGRAPH.format(input_event=sanitized_data)}"
-            print(f"Sanitized data sent to Nova: {sanitized_data}")
+            print(f"Sanitized data sent to Claude: {sanitized_data}")
 
             request_body = {
-                "schemaVersion": "messages-v1",
+                "anthropic_version": "bedrock-2023-05-31",
+                "max_tokens": 512,
+                "temperature": 0,
                 "messages": [
                     {
-                        "role": "user", 
-                        "content": [{"text": prompt}]
+                        "role": "user",
+                        "content": prompt
                     }
-                ],
-                "inferenceConfig": {
-                    "maxTokens": 512,
-                    "temperature": 0
-                }
+                ]
             }
             
             try:
                 response = bedrock_runtime.invoke_model(
-                    modelId="us.amazon.nova-micro-v1:0",
+                    modelId="us.anthropic.claude-3-7-sonnet-20250219-v1:0",
                     body=json.dumps(request_body)
                 )
 
                 result = json.loads(response['body'].read())
-                content = result['output']['message']['content'][0]['text'].strip()
-                print(f"Raw Nova response: '{content}'")
+                content = result['content'][0]['text'].strip()
+                print(f"Raw Claude response: '{content}'")
 
                 # Clean up the response to ensure valid JSON
                 if content.startswith('```'):
@@ -112,13 +110,20 @@ def lambda_handler(event, context):
                         "ip_address": event_data.split('IP: ')[1].split('\n')[0] if 'IP: ' in event_data else "Unknown"
                     }
                 
-            except Exception as nova_error:
-                print(f"Model response failed: {str(nova_error)}")
+            except Exception as claude_error:
+                print(f"Model response failed: {str(claude_error)}")
                 # Extract IP from original unsanitized data for fallback
                 ip_match = event_data.split('IP: ')[1].split(',')[0] if 'IP: ' in event_data else 'Unknown'
                 print(f"Extracted IP for fallback: {ip_match}")
-                # Fail fast during troubleshooting - don't deliver anything
-                raise nova_error
+                # Create fallback response for throttling errors
+                if "ThrottlingException" in str(claude_error):
+                    report_data = {
+                        "incident_report": "Security Alert: Network Event Detected\n\nA security event was detected but analysis was throttled. Please investigate further.",
+                        "severity": 2,
+                        "ip_address": ip_match
+                    }
+                else:
+                    raise claude_error
             
             response_body = {
                 'TEXT': {
