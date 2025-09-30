@@ -9,11 +9,13 @@ from aws_cdk import (
     Aws,
     CfnParameter,
     CustomResource,
+    RemovalPolicy,
     aws_iam as iam,
     aws_lambda as lambda_,
     aws_ec2 as ec2,
     aws_events as events,
     aws_events_targets as targets,
+    aws_ecr as ecr,
 )
 from constructs import Construct
 from aws_cdk.aws_lambda_python_alpha import PythonLayerVersion
@@ -49,6 +51,9 @@ class CodeStack(Stack):
         msk_lookup = self.create_msk_lookup_custom_resource()
         topic = self.get_topic()
         msk_layer = self.create_lambda_layer("msk_layer")
+        
+        # Create AgentCore runtime (assumes ECR repo and image exist)
+        agent_runtime = self.create_agent_runtime(topic)
         LAMBDAS_LAYER_ARN: str = (
             f"arn:aws:lambda:{Aws.REGION}:017000801446:layer:AWSLambdaPowertoolsPythonV2:68"
         )
@@ -57,7 +62,7 @@ class CodeStack(Stack):
         )
 
         _ = self.create_lambda_functions(
-            msk_layer, pandas_layer, topic, msk_lookup
+            msk_layer, pandas_layer, msk_lookup, agent_runtime
         )
 
     def get_topic(self):
@@ -127,7 +132,7 @@ def handler(event, context):
             properties={'ClusterArn': self.msk_cluster_arn.value_as_string}
         )
 
-    def create_lambda_functions(self, msk_layer, pandas_layer, topic, msk_lookup):
+    def create_lambda_functions(self, msk_layer, pandas_layer, msk_lookup, agent_runtime):
         """
         Create lambda functions
         """
@@ -165,19 +170,6 @@ def handler(event, context):
                     actions=["xray:PutTraceSegments",
                              "xray:PutTelemetryRecords"],
                     resources=["*"],
-                    effect=iam.Effect.ALLOW,
-                )
-            ],
-        )
-
-        sns_policy = iam.Policy(
-            self,
-            "SnsPolicy",
-            policy_name="AllowPublishToSns",
-            statements=[
-                iam.PolicyStatement(
-                    actions=["sns:Publish"],
-                    resources=[topic.topic_arn],
                     effect=iam.Effect.ALLOW,
                 )
             ],
@@ -388,76 +380,22 @@ def handler(event, context):
             source_arn=fragmentation_rule.rule_arn
         )
 
-        # Bedrock agent permissions for new lambdas
-        bedrock_agent_policy = iam.Policy(
+        # AgentCore permissions for new lambdas
+        agentcore_policy = iam.Policy(
             self,
-            "BedrockAgentPolicy",
-            policy_name="BedrockAgentAccessPolicy",
+            "AgentCorePolicy",
+            policy_name="AgentCoreAccessPolicy",
             statements=[
                 iam.PolicyStatement(
-                    actions=["bedrock:InvokeAgent"],
+                    actions=["bedrock-agentcore:InvokeAgentRuntime"],
                     resources=["*"],
                     effect=iam.Effect.ALLOW,
                 )
             ],
         )
 
-        # Role for agent action group lambda
-        agent_action_role = iam.Role(
-            self,
-            "AgentActionRole",
-            assumed_by=iam.ServicePrincipal("lambda.amazonaws.com"),
-            managed_policies=[
-                iam.ManagedPolicy.from_aws_managed_policy_name(
-                    "service-role/AWSLambdaBasicExecutionRole"
-                )
-            ],
-        )
-        agent_action_role.attach_inline_policy(bedrock_policy)
-        agent_action_role.attach_inline_policy(sns_policy)
-        
-        # Add KMS permissions for SNS topic encryption
-        agent_action_role.add_to_policy(
-            iam.PolicyStatement(
-                actions=[
-                    "kms:GenerateDataKey",
-                    "kms:Decrypt"
-                ],
-                resources=["*"]
-            )
-        )
-
-        # Attach Bedrock agent policy to producer role for invoke agent lambda
-        producer_role.attach_inline_policy(bedrock_agent_policy)
-
-        # Agent action group lambda
-        agent_action_group_function = lambda_.Function(
-            self,
-            "AgentActionGroupLambda",
-            function_name="SecurityTools-agent-action-group",
-            description="Lambda function for Bedrock agent action group.",
-            architecture=self.lambda_architecture,
-            handler="action_group.lambda_handler",
-            runtime=self.lambda_runtime,
-            code=lambda_.Code.from_asset(
-                path.join(os.getcwd(), LAMBDA_PATH, "agent_action_group")
-            ),
-            environment={
-                "TOPIC_ARN": topic.topic_arn,
-                "REGION_NAME": REGION_NAME,
-            },
-            role=agent_action_role,
-            timeout=Duration.minutes(5),
-            memory_size=1024,
-            tracing=lambda_.Tracing.ACTIVE,
-        )
-        
-        # Allow Bedrock to invoke the agent action group lambda
-        agent_action_group_function.add_permission(
-            "AllowBedrock",
-            principal=iam.ServicePrincipal("bedrock.amazonaws.com"),
-            action="lambda:InvokeFunction"
-        )
+        # Attach AgentCore policy to producer role for invoke agent lambda
+        producer_role.attach_inline_policy(agentcore_policy)
 
         # Invoke agent lambda (replaces GenerateReportLambda)
         invoke_agent_function = lambda_.Function(
@@ -475,8 +413,7 @@ def handler(event, context):
                 "POWERTOOLS_SERVICE_NAME": "invoke-agent",
                 "POWERTOOLS_METRICS_NAMESPACE": f"{Aws.STACK_NAME}-ns",
                 "POWERTOOLS_LOG_LEVEL": APP_LOG_LEVEL,
-                "AGENT_ID": "PLACEHOLDER_AGENT_ID",
-                "AGENT_ALIAS_ID": "PLACEHOLDER_AGENT_ALIAS_ID",
+                "AGENT_RUNTIME_ARN": agent_runtime.get_att_string("RuntimeArn"),
                 "REGION_NAME": REGION_NAME,
             },
             layers=[pandas_layer],
@@ -498,6 +435,170 @@ def handler(event, context):
             starting_position=lambda_.StartingPosition.TRIM_HORIZON,
             kafka_consumer_group_id=f"{Aws.STACK_NAME}-llm-report",
             kafka_topic="flow-log-egress"
+        )
+
+    def create_agent_runtime(self, topic):
+        """Create AgentCore runtime using CustomResource"""
+        
+        # Create role for AgentCore runtime
+        agent_runtime_role = iam.Role(
+            self,
+            "AgentRuntimeRole",
+            assumed_by=iam.ServicePrincipal("bedrock-agentcore.amazonaws.com"),
+            managed_policies=[]
+        )
+        
+        # Add permissions for SNS and Bedrock
+        agent_runtime_role.add_to_policy(
+            iam.PolicyStatement(
+                actions=[
+                    "bedrock:InvokeModel",
+                    "bedrock:InvokeModelWithResponseStream",
+                    "kms:GenerateDataKey",
+                    "kms:Decrypt"
+                ],
+                resources=["*"]
+            )
+        )
+        agent_runtime_role.add_to_policy(
+            iam.PolicyStatement(
+                actions=["sns:Publish"],
+                resources=[topic.topic_arn],
+                effect=iam.Effect.ALLOW,
+            )
+        )
+        
+        # Add ECR permissions for container image access
+        agent_runtime_role.add_to_policy(
+            iam.PolicyStatement(
+                actions=[
+                    "ecr:GetAuthorizationToken",
+                    "ecr:BatchGetImage", 
+                    "ecr:GetDownloadUrlForLayer"
+                ],
+                resources=["*"]
+            )
+        )
+        
+        # Create CustomResource Lambda for AgentCore management
+        agentcore_manager_role = iam.Role(
+            self,
+            "AgentCoreManagerRole",
+            assumed_by=iam.ServicePrincipal("lambda.amazonaws.com"),
+            managed_policies=[
+                iam.ManagedPolicy.from_aws_managed_policy_name("service-role/AWSLambdaBasicExecutionRole")
+            ]
+        )
+        
+        agentcore_manager_role.add_to_policy(
+            iam.PolicyStatement(
+                actions=[
+                    "bedrock-agentcore:CreateAgentRuntime",
+                    "bedrock-agentcore:GetAgentRuntime", 
+                    "bedrock-agentcore:CreateAgentRuntimeEndpoint",
+                    "bedrock-agentcore:ListAgentRuntimeEndpoints",
+                    "bedrock-agentcore:CreateWorkloadIdentity",
+                    "bedrock-agentcore-control:*",
+                    "iam:PassRole"
+                ],
+                resources=["*"]
+            )
+        )
+        
+        agentcore_manager_lambda = lambda_.Function(
+            self,
+            "AgentCoreManagerLambda",
+            runtime=self.lambda_runtime,
+            handler="index.handler",
+            role=agentcore_manager_role,
+            timeout=Duration.minutes(10),
+            code=lambda_.Code.from_inline(f"""
+import boto3
+import cfnresponse
+import time
+
+def handler(event, context):
+    try:
+        if event['RequestType'] == 'Delete':
+            return cfnresponse.send(event, context, cfnresponse.SUCCESS, {{}})
+        
+        props = event['ResourceProperties']
+        runtime_name = props['RuntimeName']
+        container_uri = props['ContainerUri']
+        role_arn = props['RoleArn']
+        
+        client = boto3.client('bedrock-agentcore-control')
+        
+        # Create runtime
+        response = client.create_agent_runtime(
+            agentRuntimeName=runtime_name,
+            agentRuntimeArtifact={{
+                'containerConfiguration': {{
+                    'containerUri': container_uri
+                }}
+            }},
+            networkConfiguration={{"networkMode": "PUBLIC"}},
+            roleArn=role_arn,
+            environmentVariables={{
+                "TOPIC_ARN": "{topic.topic_arn}",
+                "REGION_NAME": "{REGION_NAME}",
+
+            }}
+        )
+        
+        runtime_arn = response['agentRuntimeArn']
+        runtime_id = runtime_arn.split('/')[-1]
+        
+        # Wait for runtime to be ready
+        max_wait = 600
+        wait_time = 0
+        
+        while wait_time < max_wait:
+            status_response = client.get_agent_runtime(agentRuntimeId=runtime_id)
+            status = status_response.get('status')
+            
+            if status == 'READY':
+                # Create DEFAULT endpoint
+                try:
+                    endpoint_response = client.create_agent_runtime_endpoint(
+                        agentRuntimeId=runtime_id,
+                        name="DEFAULT"
+                    )
+                    endpoint_arn = endpoint_response['agentRuntimeEndpointArn']
+                except Exception as e:
+                    if "already exists" in str(e):
+                        endpoint_arn = f"{{runtime_arn}}/runtime-endpoint/DEFAULT"
+                    else:
+                        raise e
+                
+                cfnresponse.send(event, context, cfnresponse.SUCCESS, {{
+                    'RuntimeArn': runtime_arn,
+                    'EndpointArn': endpoint_arn
+                }})
+                return
+            elif status in ['FAILED', 'DELETING']:
+                raise Exception(f"Runtime creation failed with status: {{status}}")
+            
+            time.sleep(15)
+            wait_time += 15
+        
+        raise Exception("Runtime creation timeout")
+        
+    except Exception as e:
+        print(f"Error: {{str(e)}}")
+        cfnresponse.send(event, context, cfnresponse.FAILED, {{}})
+""")
+        )
+        
+        return CustomResource(
+            self,
+            "AgentCoreRuntime",
+            service_token=agentcore_manager_lambda.function_arn,
+            properties={
+                'RuntimeName': 'anomaly_detection_agent_runtime',
+                'ContainerUri': f"{ACCOUNT_ID}.dkr.ecr.{REGION_NAME}.amazonaws.com/anomaly-detection-agent:latest",
+                'RoleArn': agent_runtime_role.role_arn
+            }
         )
 
     def create_lambda_layer(self, layer_name):
