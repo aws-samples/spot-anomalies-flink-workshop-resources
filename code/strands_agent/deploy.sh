@@ -1,34 +1,27 @@
 #!/bin/bash
 
-# Usage: ./deploy.sh <account-id> <region>
-if [ $# -ne 2 ]; then
-    echo "Usage: $0 <account-id> <region>"
-    exit 1
-fi
+# Deploy Agent to ECR
+set -e
 
-ACCOUNT_ID=$1
-REGION=$2
-REPO_NAME="anomaly-detection-agent"
-IMAGE_TAG="latest"
+# Get AWS account ID and region
+ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+REGION=${AWS_DEFAULT_REGION:-us-west-2}
 
-echo "Building and pushing Strands agent to ECR..."
-echo "Account: $ACCOUNT_ID"
-echo "Region: $REGION"
+echo "Deploying Agent to account: $ACCOUNT_ID in region: $REGION"
 
-# Create ECR repository if it doesn't exist
-aws ecr describe-repositories --repository-names $REPO_NAME --region $REGION 2>/dev/null || \
-aws ecr create-repository --repository-name $REPO_NAME --region $REGION
-
-# Get ECR login token
+# Login to ECR
 aws ecr get-login-password --region $REGION | docker login --username AWS --password-stdin $ACCOUNT_ID.dkr.ecr.$REGION.amazonaws.com
 
-# Build image
-docker build -t $REPO_NAME:$IMAGE_TAG .
+# Create ECR repository if it doesn't exist
+echo "Creating ECR repository..."
+aws ecr describe-repositories --repository-names anomaly-detection-agent --region $REGION 2>/dev/null || \
+    aws ecr create-repository --repository-name anomaly-detection-agent --region $REGION
 
-# Tag for ECR
-docker tag $REPO_NAME:$IMAGE_TAG $ACCOUNT_ID.dkr.ecr.$REGION.amazonaws.com/$REPO_NAME:$IMAGE_TAG
+# Build and push Agent
+echo "Building Agent..."
+docker build --platform linux/arm64 -t anomaly-detection-agent:latest .
+docker tag anomaly-detection-agent:latest $ACCOUNT_ID.dkr.ecr.$REGION.amazonaws.com/anomaly-detection-agent:latest
+docker push $ACCOUNT_ID.dkr.ecr.$REGION.amazonaws.com/anomaly-detection-agent:latest
 
-# Push to ECR
-docker push $ACCOUNT_ID.dkr.ecr.$REGION.amazonaws.com/$REPO_NAME:$IMAGE_TAG
-
-echo "Image pushed to: $ACCOUNT_ID.dkr.ecr.$REGION.amazonaws.com/$REPO_NAME:$IMAGE_TAG"
+echo "Agent deployed successfully!"
+echo "Image: $ACCOUNT_ID.dkr.ecr.$REGION.amazonaws.com/anomaly-detection-agent:latest"

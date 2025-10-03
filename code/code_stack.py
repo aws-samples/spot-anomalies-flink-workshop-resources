@@ -413,7 +413,7 @@ def handler(event, context):
                 "POWERTOOLS_SERVICE_NAME": "invoke-agent",
                 "POWERTOOLS_METRICS_NAMESPACE": f"{Aws.STACK_NAME}-ns",
                 "POWERTOOLS_LOG_LEVEL": APP_LOG_LEVEL,
-                "AGENT_RUNTIME_ARN": agent_runtime.get_att_string("RuntimeArn"),
+                "AGENT_RUNTIME_ARN": agent_runtime.get_att_string("AgentRuntimeArn"),
                 "REGION_NAME": REGION_NAME,
             },
             layers=[pandas_layer],
@@ -438,9 +438,73 @@ def handler(event, context):
         )
 
     def create_agent_runtime(self, topic):
-        """Create AgentCore runtime using CustomResource"""
+        """Create both MCP server and Agent AgentCore runtimes"""
+    
+        # Create role for MCP server runtime
+        mcp_runtime_role = iam.Role(
+            self,
+            "McpRuntimeRole",
+            assumed_by=iam.ServicePrincipal("bedrock-agentcore.amazonaws.com"),
+            managed_policies=[]
+        )
         
-        # Create role for AgentCore runtime
+        # Add permissions for SNS
+        mcp_runtime_role.add_to_policy(
+            iam.PolicyStatement(
+                actions=["sns:Publish"],
+                resources=[topic.topic_arn],
+                effect=iam.Effect.ALLOW,
+            )
+        )
+
+        mcp_runtime_role.add_to_policy(
+            iam.PolicyStatement(
+                actions=[
+                    "logs:CreateLogStream",
+                    "logs:PutLogEvents",
+                    "logs:DescribeLogGroups",
+                    "logs:DescribeLogStreams",
+                    "logs:CreateLogGroup",
+                ],
+                resources=[
+                    "arn:aws:logs:*:*:log-group:/aws/bedrock-agentcore/runtimes/*",
+                    "arn:aws:logs:*:*:log-group:*",
+                    "arn:aws:logs:*:*:log-group:/aws/bedrock-agentcore/runtimes/*:log-stream:*",
+                ],
+                effect=iam.Effect.ALLOW,
+            )
+        )
+        mcp_runtime_role.add_to_policy(
+            iam.PolicyStatement(
+                actions=[
+                    "xray:PutTraceSegments", 
+                    "xray:PutTelemetryRecords", 
+                    "xray:GetSamplingRules", 
+                    "xray:GetSamplingTargets"
+                ],
+                resources=[
+                    "*"
+                ],
+                effect=iam.Effect.ALLOW,
+            )
+        )
+
+        # Add ECR permissions
+        mcp_runtime_role.add_to_policy(
+            iam.PolicyStatement(
+                actions=[
+                    "ecr:GetAuthorizationToken",
+                    "ecr:BatchGetImage", 
+                    "ecr:GetDownloadUrlForLayer",
+                    "kms:GenerateDataKey",
+                    "kms:Decrypt"
+                ],
+                resources=["*"],
+                effect=iam.Effect.ALLOW,
+            )
+        )
+        
+        # Create role for Agent runtime
         agent_runtime_role = iam.Role(
             self,
             "AgentRuntimeRole",
@@ -448,27 +512,19 @@ def handler(event, context):
             managed_policies=[]
         )
         
-        # Add permissions for SNS and Bedrock
+        # Add permissions for Bedrock and AgentCore invocation
         agent_runtime_role.add_to_policy(
             iam.PolicyStatement(
                 actions=[
                     "bedrock:InvokeModel",
                     "bedrock:InvokeModelWithResponseStream",
-                    "kms:GenerateDataKey",
-                    "kms:Decrypt"
+                    "bedrock-agentcore:InvokeAgentRuntime",
                 ],
                 resources=["*"]
             )
         )
-        agent_runtime_role.add_to_policy(
-            iam.PolicyStatement(
-                actions=["sns:Publish"],
-                resources=[topic.topic_arn],
-                effect=iam.Effect.ALLOW,
-            )
-        )
         
-        # Add ECR permissions for container image access
+        # Add ECR permissions
         agent_runtime_role.add_to_policy(
             iam.PolicyStatement(
                 actions=[
@@ -479,7 +535,39 @@ def handler(event, context):
                 resources=["*"]
             )
         )
-        
+        agent_runtime_role.add_to_policy(
+            iam.PolicyStatement(
+                actions=[
+                    "logs:CreateLogStream",
+                    "logs:PutLogEvents",
+                    "logs:DescribeLogGroups",
+                    "logs:DescribeLogStreams",
+                    "logs:CreateLogGroup",
+                ],
+                resources=[
+                    "arn:aws:logs:*:*:log-group:/aws/bedrock-agentcore/runtimes/*",
+                    "arn:aws:logs:*:*:log-group:*",
+                    "arn:aws:logs:*:*:log-group:/aws/bedrock-agentcore/runtimes/*:log-stream:*",
+                ],
+                effect=iam.Effect.ALLOW,
+            )
+        )
+        agent_runtime_role.add_to_policy(
+            iam.PolicyStatement(
+                actions=[
+                    "xray:PutTraceSegments", 
+                    "xray:PutTelemetryRecords", 
+                    "xray:GetSamplingRules", 
+                    "xray:GetSamplingTargets"
+                ],
+                resources=[
+                    "*"
+                ],
+                effect=iam.Effect.ALLOW,
+            )
+        )
+
+
         # Create CustomResource Lambda for AgentCore management
         agentcore_manager_role = iam.Role(
             self,
@@ -511,7 +599,7 @@ def handler(event, context):
             runtime=self.lambda_runtime,
             handler="index.handler",
             role=agentcore_manager_role,
-            timeout=Duration.minutes(10),
+            timeout=Duration.minutes(15),
             code=lambda_.Code.from_inline(f"""
 import boto3
 import cfnresponse
@@ -519,70 +607,118 @@ import time
 
 def handler(event, context):
     try:
+        time.sleep(5)
         if event['RequestType'] == 'Delete':
             return cfnresponse.send(event, context, cfnresponse.SUCCESS, {{}})
         
         props = event['ResourceProperties']
-        runtime_name = props['RuntimeName']
-        container_uri = props['ContainerUri']
-        role_arn = props['RoleArn']
         
         client = boto3.client('bedrock-agentcore-control')
         
-        # Create runtime
-        response = client.create_agent_runtime(
-            agentRuntimeName=runtime_name,
+        # Create MCP server runtime first
+        mcp_response = client.create_agent_runtime(
+            agentRuntimeName='incident_management_mcp_server',
             agentRuntimeArtifact={{
                 'containerConfiguration': {{
-                    'containerUri': container_uri
+                    'containerUri': '{ACCOUNT_ID}.dkr.ecr.{REGION_NAME}.amazonaws.com/incident-management-mcp:latest'
                 }}
             }},
             networkConfiguration={{"networkMode": "PUBLIC"}},
-            roleArn=role_arn,
+            roleArn=props['McpRoleArn'],
             environmentVariables={{
                 "TOPIC_ARN": "{topic.topic_arn}",
-                "REGION_NAME": "{REGION_NAME}",
-
+                "REGION_NAME": "{REGION_NAME}"
+            }},
+            protocolConfiguration={{
+                "serverProtocol": "MCP"
             }}
         )
         
-        runtime_arn = response['agentRuntimeArn']
-        runtime_id = runtime_arn.split('/')[-1]
+        mcp_runtime_arn = mcp_response['agentRuntimeArn']
+        mcp_runtime_id = mcp_runtime_arn.split('/')[-1]
         
-        # Wait for runtime to be ready
+        # Wait for MCP runtime to be ready
         max_wait = 600
         wait_time = 0
         
         while wait_time < max_wait:
-            status_response = client.get_agent_runtime(agentRuntimeId=runtime_id)
+            status_response = client.get_agent_runtime(agentRuntimeId=mcp_runtime_id)
             status = status_response.get('status')
             
             if status == 'READY':
-                # Create DEFAULT endpoint
-                try:
-                    endpoint_response = client.create_agent_runtime_endpoint(
-                        agentRuntimeId=runtime_id,
-                        name="DEFAULT"
-                    )
-                    endpoint_arn = endpoint_response['agentRuntimeEndpointArn']
-                except Exception as e:
-                    if "already exists" in str(e):
-                        endpoint_arn = f"{{runtime_arn}}/runtime-endpoint/DEFAULT"
-                    else:
-                        raise e
-                
-                cfnresponse.send(event, context, cfnresponse.SUCCESS, {{
-                    'RuntimeArn': runtime_arn,
-                    'EndpointArn': endpoint_arn
-                }})
-                return
+                break
             elif status in ['FAILED', 'DELETING']:
-                raise Exception(f"Runtime creation failed with status: {{status}}")
+                raise Exception(f"MCP runtime creation failed with status: {{status}}")
             
             time.sleep(15)
             wait_time += 15
         
-        raise Exception("Runtime creation timeout")
+        if wait_time >= max_wait:
+            raise Exception("MCP runtime creation timeout")
+        
+        # Create MCP endpoint
+        try:
+            mcp_endpoint_response = client.create_agent_runtime_endpoint(
+                agentRuntimeId=mcp_runtime_id,
+                name="DEFAULT"
+            )
+        except Exception as e:
+            if "already exists" not in str(e):
+                raise e
+        
+        # Create Agent runtime
+        agent_response = client.create_agent_runtime(
+            agentRuntimeName='anomaly_detection_agent_runtime',
+            agentRuntimeArtifact={{
+                'containerConfiguration': {{
+                    'containerUri': '{ACCOUNT_ID}.dkr.ecr.{REGION_NAME}.amazonaws.com/anomaly-detection-agent:latest'
+                }}
+            }},
+            networkConfiguration={{"networkMode": "PUBLIC"}},
+            roleArn=props['AgentRoleArn'],
+            environmentVariables={{
+                "MCP_RUNTIME_ARN": mcp_runtime_arn,
+                "REGION_NAME": "{REGION_NAME}"
+            }}
+        )
+        
+        agent_runtime_arn = agent_response['agentRuntimeArn']
+        agent_runtime_id = agent_runtime_arn.split('/')[-1]
+        
+        # Wait for Agent runtime to be ready
+        wait_time = 0
+        
+        while wait_time < max_wait:
+            status_response = client.get_agent_runtime(agentRuntimeId=agent_runtime_id)
+            status = status_response.get('status')
+            
+            if status == 'READY':
+                # Create agent endpoint
+                try:
+                    agent_endpoint_response = client.create_agent_runtime_endpoint(
+                        agentRuntimeId=agent_runtime_id,
+                        name="DEFAULT"
+                    )
+                    agent_endpoint_arn = agent_endpoint_response['agentRuntimeEndpointArn']
+                except Exception as e:
+                    if "already exists" in str(e):
+                        agent_endpoint_arn = f"{{agent_runtime_arn}}/runtime-endpoint/DEFAULT"
+                    else:
+                        raise e
+                
+                cfnresponse.send(event, context, cfnresponse.SUCCESS, {{
+                    'McpRuntimeArn': mcp_runtime_arn,
+                    'AgentRuntimeArn': agent_runtime_arn,
+                    'AgentEndpointArn': agent_endpoint_arn
+                }})
+                return
+            elif status in ['FAILED', 'DELETING']:
+                raise Exception(f"Agent runtime creation failed with status: {{status}}")
+            
+            time.sleep(15)
+            wait_time += 15
+        
+        raise Exception("Agent runtime creation timeout")
         
     except Exception as e:
         print(f"Error: {{str(e)}}")
@@ -590,14 +726,15 @@ def handler(event, context):
 """)
         )
         
+        agentcore_manager_lambda.node.add_dependency(mcp_runtime_role)
+        agentcore_manager_lambda.node.add_dependency(agent_runtime_role)
         return CustomResource(
             self,
-            "AgentCoreRuntime",
+            "AgentCoreRuntimes",
             service_token=agentcore_manager_lambda.function_arn,
             properties={
-                'RuntimeName': 'anomaly_detection_agent_runtime',
-                'ContainerUri': f"{ACCOUNT_ID}.dkr.ecr.{REGION_NAME}.amazonaws.com/anomaly-detection-agent:latest",
-                'RoleArn': agent_runtime_role.role_arn
+                'McpRoleArn': mcp_runtime_role.role_arn,
+                'AgentRoleArn': agent_runtime_role.role_arn
             }
         )
 

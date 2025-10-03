@@ -1,4 +1,4 @@
-FROM --platform=linux/arm64 python:3.12-slim
+FROM --platform=linux/arm64 public.ecr.aws/docker/library/python:3.12-slim
 
 WORKDIR /app
 
@@ -14,6 +14,7 @@ COPY requirements.txt .
 # Upgrade pip and install requirements
 RUN pip install --upgrade pip
 RUN python -m pip install --no-cache-dir aws_opentelemetry_distro_genai_beta>=0.1.2
+RUN pip install run-mcp-servers-with-aws-lambda==0.4.3
 RUN pip install --no-cache-dir -r requirements.txt
 
 COPY agent.py .

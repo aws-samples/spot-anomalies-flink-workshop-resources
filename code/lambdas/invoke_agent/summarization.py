@@ -108,8 +108,10 @@ def process_anomaly_message(msg):
     
     try:
         agent_response = invoke_agent_with_retry(event_data)
+        logger.info(f"Agent response: {agent_response}")
         return {"anomaly": jsg_msg, "agent_response": agent_response}
     except Exception as e:
+        logger.error(f"Error processing anomaly: {str(e)}")
         return {"anomaly": jsg_msg, "error": str(e)}
 
 @logger.inject_lambda_context(log_event=True, clear_state=True)
