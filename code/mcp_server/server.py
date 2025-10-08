@@ -7,8 +7,9 @@ logging.basicConfig(level=logging.INFO)
 mcp = FastMCP(host="0.0.0.0", stateless_http=True)
 
 # Environment variables
-TOPIC_ARN = os.environ.get("TOPIC_ARN", "")
-REGION_NAME = os.environ.get("REGION_NAME", "us-west-2")
+REGION_NAME = os.environ["AWS_REGION"]
+ACCOUNT_ID = boto3.client("sts").get_caller_identity()["Account"]
+TOPIC_ARN = f"arn:aws:sns:{REGION_NAME}:{ACCOUNT_ID}:AnomalyReportSNSTopic"
 
 sns_client = boto3.client("sns", region_name=REGION_NAME)
 

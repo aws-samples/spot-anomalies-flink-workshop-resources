@@ -53,7 +53,7 @@ class CodeStack(Stack):
         msk_layer = self.create_lambda_layer("msk_layer")
         
         # Create AgentCore runtime (assumes ECR repo and image exist)
-        agent_runtime = self.create_agent_runtime(topic)
+        _ = self.create_agent_runtime_roles(topic)
         LAMBDAS_LAYER_ARN: str = (
             f"arn:aws:lambda:{Aws.REGION}:017000801446:layer:AWSLambdaPowertoolsPythonV2:68"
         )
@@ -62,7 +62,7 @@ class CodeStack(Stack):
         )
 
         _ = self.create_lambda_functions(
-            msk_layer, pandas_layer, msk_lookup, agent_runtime
+            msk_layer, pandas_layer, msk_lookup
         )
 
     def get_topic(self):
@@ -132,7 +132,7 @@ def handler(event, context):
             properties={'ClusterArn': self.msk_cluster_arn.value_as_string}
         )
 
-    def create_lambda_functions(self, msk_layer, pandas_layer, msk_lookup, agent_runtime):
+    def create_lambda_functions(self, msk_layer, pandas_layer, msk_lookup):
         """
         Create lambda functions
         """
@@ -413,7 +413,7 @@ def handler(event, context):
                 "POWERTOOLS_SERVICE_NAME": "invoke-agent",
                 "POWERTOOLS_METRICS_NAMESPACE": f"{Aws.STACK_NAME}-ns",
                 "POWERTOOLS_LOG_LEVEL": APP_LOG_LEVEL,
-                "AGENT_RUNTIME_ARN": agent_runtime.get_att_string("AgentRuntimeArn"),
+                "AGENT_RUNTIME_ARN": "TO UPDATE",
                 "REGION_NAME": REGION_NAME,
             },
             layers=[pandas_layer],
@@ -437,7 +437,7 @@ def handler(event, context):
             kafka_topic="flow-log-egress"
         )
 
-    def create_agent_runtime(self, topic):
+    def create_agent_runtime_roles(self, topic):
         """Create both MCP server and Agent AgentCore runtimes"""
     
         # Create role for MCP server runtime
@@ -592,151 +592,7 @@ def handler(event, context):
                 resources=["*"]
             )
         )
-        
-        agentcore_manager_lambda = lambda_.Function(
-            self,
-            "AgentCoreManagerLambda",
-            runtime=self.lambda_runtime,
-            handler="index.handler",
-            role=agentcore_manager_role,
-            timeout=Duration.minutes(15),
-            code=lambda_.Code.from_inline(f"""
-import boto3
-import cfnresponse
-import time
-
-def handler(event, context):
-    try:
-        time.sleep(5)
-        if event['RequestType'] == 'Delete':
-            return cfnresponse.send(event, context, cfnresponse.SUCCESS, {{}})
-        
-        props = event['ResourceProperties']
-        
-        client = boto3.client('bedrock-agentcore-control')
-        
-        # Create MCP server runtime first
-        mcp_response = client.create_agent_runtime(
-            agentRuntimeName='incident_management_mcp_server',
-            agentRuntimeArtifact={{
-                'containerConfiguration': {{
-                    'containerUri': '{ACCOUNT_ID}.dkr.ecr.{REGION_NAME}.amazonaws.com/incident-management-mcp:latest'
-                }}
-            }},
-            networkConfiguration={{"networkMode": "PUBLIC"}},
-            roleArn=props['McpRoleArn'],
-            environmentVariables={{
-                "TOPIC_ARN": "{topic.topic_arn}",
-                "REGION_NAME": "{REGION_NAME}"
-            }},
-            protocolConfiguration={{
-                "serverProtocol": "MCP"
-            }}
-        )
-        
-        mcp_runtime_arn = mcp_response['agentRuntimeArn']
-        mcp_runtime_id = mcp_runtime_arn.split('/')[-1]
-        
-        # Wait for MCP runtime to be ready
-        max_wait = 600
-        wait_time = 0
-        
-        while wait_time < max_wait:
-            status_response = client.get_agent_runtime(agentRuntimeId=mcp_runtime_id)
-            status = status_response.get('status')
-            
-            if status == 'READY':
-                break
-            elif status in ['FAILED', 'DELETING']:
-                raise Exception(f"MCP runtime creation failed with status: {{status}}")
-            
-            time.sleep(15)
-            wait_time += 15
-        
-        if wait_time >= max_wait:
-            raise Exception("MCP runtime creation timeout")
-        
-        # Create MCP endpoint
-        try:
-            mcp_endpoint_response = client.create_agent_runtime_endpoint(
-                agentRuntimeId=mcp_runtime_id,
-                name="DEFAULT"
-            )
-        except Exception as e:
-            if "already exists" not in str(e):
-                raise e
-        
-        # Create Agent runtime
-        agent_response = client.create_agent_runtime(
-            agentRuntimeName='anomaly_detection_agent_runtime',
-            agentRuntimeArtifact={{
-                'containerConfiguration': {{
-                    'containerUri': '{ACCOUNT_ID}.dkr.ecr.{REGION_NAME}.amazonaws.com/anomaly-detection-agent:latest'
-                }}
-            }},
-            networkConfiguration={{"networkMode": "PUBLIC"}},
-            roleArn=props['AgentRoleArn'],
-            environmentVariables={{
-                "MCP_RUNTIME_ARN": mcp_runtime_arn,
-                "REGION_NAME": "{REGION_NAME}"
-            }}
-        )
-        
-        agent_runtime_arn = agent_response['agentRuntimeArn']
-        agent_runtime_id = agent_runtime_arn.split('/')[-1]
-        
-        # Wait for Agent runtime to be ready
-        wait_time = 0
-        
-        while wait_time < max_wait:
-            status_response = client.get_agent_runtime(agentRuntimeId=agent_runtime_id)
-            status = status_response.get('status')
-            
-            if status == 'READY':
-                # Create agent endpoint
-                try:
-                    agent_endpoint_response = client.create_agent_runtime_endpoint(
-                        agentRuntimeId=agent_runtime_id,
-                        name="DEFAULT"
-                    )
-                    agent_endpoint_arn = agent_endpoint_response['agentRuntimeEndpointArn']
-                except Exception as e:
-                    if "already exists" in str(e):
-                        agent_endpoint_arn = f"{{agent_runtime_arn}}/runtime-endpoint/DEFAULT"
-                    else:
-                        raise e
-                
-                cfnresponse.send(event, context, cfnresponse.SUCCESS, {{
-                    'McpRuntimeArn': mcp_runtime_arn,
-                    'AgentRuntimeArn': agent_runtime_arn,
-                    'AgentEndpointArn': agent_endpoint_arn
-                }})
-                return
-            elif status in ['FAILED', 'DELETING']:
-                raise Exception(f"Agent runtime creation failed with status: {{status}}")
-            
-            time.sleep(15)
-            wait_time += 15
-        
-        raise Exception("Agent runtime creation timeout")
-        
-    except Exception as e:
-        print(f"Error: {{str(e)}}")
-        cfnresponse.send(event, context, cfnresponse.FAILED, {{}})
-""")
-        )
-        
-        agentcore_manager_lambda.node.add_dependency(mcp_runtime_role)
-        agentcore_manager_lambda.node.add_dependency(agent_runtime_role)
-        return CustomResource(
-            self,
-            "AgentCoreRuntimes",
-            service_token=agentcore_manager_lambda.function_arn,
-            properties={
-                'McpRoleArn': mcp_runtime_role.role_arn,
-                'AgentRoleArn': agent_runtime_role.role_arn
-            }
-        )
+        return agent_runtime_role, mcp_runtime_role
 
     def create_lambda_layer(self, layer_name):
         """
