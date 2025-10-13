@@ -11,8 +11,8 @@ logging.basicConfig(level=logging.INFO)
 app = BedrockAgentCoreApp()
 
 # Environment variables
-MCP_RUNTIME_ARN = os.environ.get("MCP_RUNTIME_ARN", "")
-REGION_NAME = os.environ.get("REGION_NAME", "us-east-1")
+MCP_RUNTIME_ARN = os.environ["MCP_RUNTIME_ARN"]
+REGION_NAME = os.environ["AWS_REGION"]
 
 # Setup MCP client
 encoded_arn = MCP_RUNTIME_ARN.replace(':', '%3A').replace('/', '%2F')
