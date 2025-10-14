@@ -9,11 +9,13 @@ from aws_cdk import (
     Aws,
     CfnParameter,
     CustomResource,
+    RemovalPolicy,
     aws_iam as iam,
     aws_lambda as lambda_,
     aws_ec2 as ec2,
     aws_events as events,
     aws_events_targets as targets,
+    aws_ecr as ecr,
 )
 from constructs import Construct
 from aws_cdk.aws_lambda_python_alpha import PythonLayerVersion
@@ -49,6 +51,9 @@ class CodeStack(Stack):
         msk_lookup = self.create_msk_lookup_custom_resource()
         topic = self.get_topic()
         msk_layer = self.create_lambda_layer("msk_layer")
+        
+        # Create AgentCore runtime (assumes ECR repo and image exist)
+        _ = self.create_agent_runtime_roles(topic)
         LAMBDAS_LAYER_ARN: str = (
             f"arn:aws:lambda:{Aws.REGION}:017000801446:layer:AWSLambdaPowertoolsPythonV2:68"
         )
@@ -57,7 +62,7 @@ class CodeStack(Stack):
         )
 
         _ = self.create_lambda_functions(
-            msk_layer, pandas_layer, topic, msk_lookup
+            msk_layer, pandas_layer, msk_lookup
         )
 
     def get_topic(self):
@@ -127,7 +132,7 @@ def handler(event, context):
             properties={'ClusterArn': self.msk_cluster_arn.value_as_string}
         )
 
-    def create_lambda_functions(self, msk_layer, pandas_layer, topic, msk_lookup):
+    def create_lambda_functions(self, msk_layer, pandas_layer, msk_lookup):
         """
         Create lambda functions
         """
@@ -165,19 +170,6 @@ def handler(event, context):
                     actions=["xray:PutTraceSegments",
                              "xray:PutTelemetryRecords"],
                     resources=["*"],
-                    effect=iam.Effect.ALLOW,
-                )
-            ],
-        )
-
-        sns_policy = iam.Policy(
-            self,
-            "SnsPolicy",
-            policy_name="AllowPublishToSns",
-            statements=[
-                iam.PolicyStatement(
-                    actions=["sns:Publish"],
-                    resources=[topic.topic_arn],
                     effect=iam.Effect.ALLOW,
                 )
             ],
@@ -388,76 +380,22 @@ def handler(event, context):
             source_arn=fragmentation_rule.rule_arn
         )
 
-        # Bedrock agent permissions for new lambdas
-        bedrock_agent_policy = iam.Policy(
+        # AgentCore permissions for new lambdas
+        agentcore_policy = iam.Policy(
             self,
-            "BedrockAgentPolicy",
-            policy_name="BedrockAgentAccessPolicy",
+            "AgentCorePolicy",
+            policy_name="AgentCoreAccessPolicy",
             statements=[
                 iam.PolicyStatement(
-                    actions=["bedrock:InvokeAgent"],
+                    actions=["bedrock-agentcore:InvokeAgentRuntime"],
                     resources=["*"],
                     effect=iam.Effect.ALLOW,
                 )
             ],
         )
 
-        # Role for agent action group lambda
-        agent_action_role = iam.Role(
-            self,
-            "AgentActionRole",
-            assumed_by=iam.ServicePrincipal("lambda.amazonaws.com"),
-            managed_policies=[
-                iam.ManagedPolicy.from_aws_managed_policy_name(
-                    "service-role/AWSLambdaBasicExecutionRole"
-                )
-            ],
-        )
-        agent_action_role.attach_inline_policy(bedrock_policy)
-        agent_action_role.attach_inline_policy(sns_policy)
-        
-        # Add KMS permissions for SNS topic encryption
-        agent_action_role.add_to_policy(
-            iam.PolicyStatement(
-                actions=[
-                    "kms:GenerateDataKey",
-                    "kms:Decrypt"
-                ],
-                resources=["*"]
-            )
-        )
-
-        # Attach Bedrock agent policy to producer role for invoke agent lambda
-        producer_role.attach_inline_policy(bedrock_agent_policy)
-
-        # Agent action group lambda
-        agent_action_group_function = lambda_.Function(
-            self,
-            "AgentActionGroupLambda",
-            function_name="SecurityTools-agent-action-group",
-            description="Lambda function for Bedrock agent action group.",
-            architecture=self.lambda_architecture,
-            handler="action_group.lambda_handler",
-            runtime=self.lambda_runtime,
-            code=lambda_.Code.from_asset(
-                path.join(os.getcwd(), LAMBDA_PATH, "agent_action_group")
-            ),
-            environment={
-                "TOPIC_ARN": topic.topic_arn,
-                "REGION_NAME": REGION_NAME,
-            },
-            role=agent_action_role,
-            timeout=Duration.minutes(5),
-            memory_size=1024,
-            tracing=lambda_.Tracing.ACTIVE,
-        )
-        
-        # Allow Bedrock to invoke the agent action group lambda
-        agent_action_group_function.add_permission(
-            "AllowBedrock",
-            principal=iam.ServicePrincipal("bedrock.amazonaws.com"),
-            action="lambda:InvokeFunction"
-        )
+        # Attach AgentCore policy to producer role for invoke agent lambda
+        producer_role.attach_inline_policy(agentcore_policy)
 
         # Invoke agent lambda (replaces GenerateReportLambda)
         invoke_agent_function = lambda_.Function(
@@ -475,8 +413,7 @@ def handler(event, context):
                 "POWERTOOLS_SERVICE_NAME": "invoke-agent",
                 "POWERTOOLS_METRICS_NAMESPACE": f"{Aws.STACK_NAME}-ns",
                 "POWERTOOLS_LOG_LEVEL": APP_LOG_LEVEL,
-                "AGENT_ID": "PLACEHOLDER_AGENT_ID",
-                "AGENT_ALIAS_ID": "PLACEHOLDER_AGENT_ALIAS_ID",
+                "AGENT_RUNTIME_ARN": "TO UPDATE",
                 "REGION_NAME": REGION_NAME,
             },
             layers=[pandas_layer],
@@ -499,6 +436,163 @@ def handler(event, context):
             kafka_consumer_group_id=f"{Aws.STACK_NAME}-llm-report",
             kafka_topic="flow-log-egress"
         )
+
+    def create_agent_runtime_roles(self, topic):
+        """Create both MCP server and Agent AgentCore runtimes"""
+    
+        # Create role for MCP server runtime
+        mcp_runtime_role = iam.Role(
+            self,
+            "McpRuntimeRole",
+            assumed_by=iam.ServicePrincipal("bedrock-agentcore.amazonaws.com"),
+            managed_policies=[]
+        )
+        
+        # Add permissions for SNS
+        mcp_runtime_role.add_to_policy(
+            iam.PolicyStatement(
+                actions=["sns:Publish"],
+                resources=[topic.topic_arn],
+                effect=iam.Effect.ALLOW,
+            )
+        )
+
+        mcp_runtime_role.add_to_policy(
+            iam.PolicyStatement(
+                actions=[
+                    "logs:CreateLogStream",
+                    "logs:PutLogEvents",
+                    "logs:DescribeLogGroups",
+                    "logs:DescribeLogStreams",
+                    "logs:CreateLogGroup",
+                ],
+                resources=[
+                    "arn:aws:logs:*:*:log-group:/aws/bedrock-agentcore/runtimes/*",
+                    "arn:aws:logs:*:*:log-group:*",
+                    "arn:aws:logs:*:*:log-group:/aws/bedrock-agentcore/runtimes/*:log-stream:*",
+                ],
+                effect=iam.Effect.ALLOW,
+            )
+        )
+        mcp_runtime_role.add_to_policy(
+            iam.PolicyStatement(
+                actions=[
+                    "xray:PutTraceSegments", 
+                    "xray:PutTelemetryRecords", 
+                    "xray:GetSamplingRules", 
+                    "xray:GetSamplingTargets"
+                ],
+                resources=[
+                    "*"
+                ],
+                effect=iam.Effect.ALLOW,
+            )
+        )
+
+        # Add ECR permissions
+        mcp_runtime_role.add_to_policy(
+            iam.PolicyStatement(
+                actions=[
+                    "ecr:GetAuthorizationToken",
+                    "ecr:BatchGetImage", 
+                    "ecr:GetDownloadUrlForLayer",
+                    "kms:GenerateDataKey",
+                    "kms:Decrypt"
+                ],
+                resources=["*"],
+                effect=iam.Effect.ALLOW,
+            )
+        )
+        
+        # Create role for Agent runtime
+        agent_runtime_role = iam.Role(
+            self,
+            "AgentRuntimeRole",
+            assumed_by=iam.ServicePrincipal("bedrock-agentcore.amazonaws.com"),
+            managed_policies=[]
+        )
+        
+        # Add permissions for Bedrock and AgentCore invocation
+        agent_runtime_role.add_to_policy(
+            iam.PolicyStatement(
+                actions=[
+                    "bedrock:InvokeModel",
+                    "bedrock:InvokeModelWithResponseStream",
+                    "bedrock-agentcore:InvokeAgentRuntime",
+                ],
+                resources=["*"]
+            )
+        )
+        
+        # Add ECR permissions
+        agent_runtime_role.add_to_policy(
+            iam.PolicyStatement(
+                actions=[
+                    "ecr:GetAuthorizationToken",
+                    "ecr:BatchGetImage", 
+                    "ecr:GetDownloadUrlForLayer"
+                ],
+                resources=["*"]
+            )
+        )
+        agent_runtime_role.add_to_policy(
+            iam.PolicyStatement(
+                actions=[
+                    "logs:CreateLogStream",
+                    "logs:PutLogEvents",
+                    "logs:DescribeLogGroups",
+                    "logs:DescribeLogStreams",
+                    "logs:CreateLogGroup",
+                ],
+                resources=[
+                    "arn:aws:logs:*:*:log-group:/aws/bedrock-agentcore/runtimes/*",
+                    "arn:aws:logs:*:*:log-group:*",
+                    "arn:aws:logs:*:*:log-group:/aws/bedrock-agentcore/runtimes/*:log-stream:*",
+                ],
+                effect=iam.Effect.ALLOW,
+            )
+        )
+        agent_runtime_role.add_to_policy(
+            iam.PolicyStatement(
+                actions=[
+                    "xray:PutTraceSegments", 
+                    "xray:PutTelemetryRecords", 
+                    "xray:GetSamplingRules", 
+                    "xray:GetSamplingTargets"
+                ],
+                resources=[
+                    "*"
+                ],
+                effect=iam.Effect.ALLOW,
+            )
+        )
+
+
+        # Create CustomResource Lambda for AgentCore management
+        agentcore_manager_role = iam.Role(
+            self,
+            "AgentCoreManagerRole",
+            assumed_by=iam.ServicePrincipal("lambda.amazonaws.com"),
+            managed_policies=[
+                iam.ManagedPolicy.from_aws_managed_policy_name("service-role/AWSLambdaBasicExecutionRole")
+            ]
+        )
+        
+        agentcore_manager_role.add_to_policy(
+            iam.PolicyStatement(
+                actions=[
+                    "bedrock-agentcore:CreateAgentRuntime",
+                    "bedrock-agentcore:GetAgentRuntime", 
+                    "bedrock-agentcore:CreateAgentRuntimeEndpoint",
+                    "bedrock-agentcore:ListAgentRuntimeEndpoints",
+                    "bedrock-agentcore:CreateWorkloadIdentity",
+                    "bedrock-agentcore-control:*",
+                    "iam:PassRole"
+                ],
+                resources=["*"]
+            )
+        )
+        return agent_runtime_role, mcp_runtime_role
 
     def create_lambda_layer(self, layer_name):
         """

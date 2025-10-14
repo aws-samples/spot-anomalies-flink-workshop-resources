@@ -1,0 +1,7 @@
+strands-agents
+strands-agents-tools
+mcp
+bedrock-agentcore
+bedrock-agentcore-starter-toolkit
+aws-opentelemetry-distro>=0.10.1
+run-mcp-servers-with-aws-lambda
