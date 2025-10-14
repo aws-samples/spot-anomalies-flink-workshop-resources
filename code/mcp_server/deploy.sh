@@ -5,7 +5,7 @@ set -e
 
 # Get AWS account ID and region
 ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
-REGION=${AWS_DEFAULT_REGION:-us-west-2}
+REGION=${AWS_DEFAULT_REGION}
 
 echo "Deploying MCP server to account: $ACCOUNT_ID in region: $REGION"
 
