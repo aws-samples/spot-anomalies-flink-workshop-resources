@@ -474,6 +474,21 @@ def handler(event, context):
                 effect=iam.Effect.ALLOW,
             )
         )
+
+        mcp_runtime_role.add_to_policy(
+            iam.PolicyStatement(
+                actions=[
+                "aws-marketplace:Subscribe",
+                "aws-marketplace:ViewSubscriptions",
+                "aws-marketplace:Unsubscribe"
+                ],
+                resources=[
+                    "*"
+                ],
+                effect=iam.Effect.ALLOW,
+            )
+        )
+
         mcp_runtime_role.add_to_policy(
             iam.PolicyStatement(
                 actions=[
@@ -566,7 +581,19 @@ def handler(event, context):
                 effect=iam.Effect.ALLOW,
             )
         )
-
+        agent_runtime_role.add_to_policy(
+            iam.PolicyStatement(
+                actions=[
+                "aws-marketplace:Subscribe",
+                "aws-marketplace:ViewSubscriptions",
+                "aws-marketplace:Unsubscribe"
+                ],
+                resources=[
+                    "*"
+                ],
+                effect=iam.Effect.ALLOW,
+            )
+        )
 
         # Create CustomResource Lambda for AgentCore management
         agentcore_manager_role = iam.Role(
