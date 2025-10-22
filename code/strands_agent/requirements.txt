@@ -3,3 +3,4 @@ strands-agents-tools
 mcp
 bedrock-agentcore
 bedrock-agentcore-starter-toolkit
+run-mcp-servers-with-aws-lambda
