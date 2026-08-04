@@ -7,6 +7,7 @@ import os
 import socket
 import hashlib
 import time
+from datetime import datetime, timezone
 
 from faker import Faker
 from faker.providers import internet
@@ -87,7 +88,9 @@ def produce_normal_events():
             "packets": random.randint(100, 500),
             "bytes": random.randint(64, 1500),
             "writer_id": f"ENI-{generate_8char_hash()}-x{random.randint(1, 5)}",
-            "text": f"Normal traffic from {fake.ipv4_private()} to {random.choice(internal_ips)}"
+            "text": f"Normal traffic from {fake.ipv4_private()} to {random.choice(internal_ips)}",
+            # ISO 8601 event timestamp for hourly time-based Iceberg partitioning
+            "event_time_iso": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
         }
         
         producer.send(topic, key=str(random.randint(1, 10000)), value=data)

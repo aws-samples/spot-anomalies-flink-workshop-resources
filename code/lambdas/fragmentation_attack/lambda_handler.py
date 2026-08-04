@@ -7,6 +7,7 @@ import random
 import os
 import socket
 import hashlib
+from datetime import datetime, timezone
 
 from kafka import KafkaProducer
 from kafka.errors import KafkaError
@@ -106,7 +107,9 @@ def lambda_handler(event, context):
             "writer_id": f"ENI{generate_8char_hash()}-x{random.randint(1, 5)}",
             "text": generate_fragmentation_text(
                 attacker_ip, target_ip, fragment_id, frag_num * 8, frag_num < 29
-            )
+            ),
+            # ISO 8601 event timestamp for hourly time-based Iceberg partitioning
+            "event_time_iso": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
         }
         
         producer.send(topic, key=str(frag_num), value=data)

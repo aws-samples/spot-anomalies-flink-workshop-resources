@@ -99,30 +99,42 @@ class CodeStack(Stack):
 import boto3
 import cfnresponse
 def handler(event, context):
+    # Always send a response to CloudFormation; default to FAILED with empty data
+    # so a code path that forgets to send can never hang the stack.
+    result = {}
+    status = cfnresponse.FAILED
     try:
         if event['RequestType'] == 'Delete':
-            return {'Status': 'SUCCESS', 'PhysicalResourceId': 'msk-lookup'}
+            cfnresponse.send(event, context, cfnresponse.SUCCESS, {}, 'msk-lookup')
+            return
         cluster_arn = event['ResourceProperties']['ClusterArn']
         kafka = boto3.client('kafka')
-        response = kafka.describe_cluster_v2(ClusterArn=cluster_arn)
-        cluster = response['ClusterInfo']
-        brokers_response = kafka.get_bootstrap_brokers(ClusterArn=cluster_arn)
-        bootstrap_address = brokers_response.get('BootstrapBrokerStringSaslIam', '')
+        ec2 = boto3.client('ec2')
+        cluster = kafka.describe_cluster_v2(ClusterArn=cluster_arn)['ClusterInfo']
+        bootstrap_address = kafka.get_bootstrap_brokers(ClusterArn=cluster_arn).get('BootstrapBrokerStringSaslIam', '')
+
+        # Serverless and Provisioned/Express expose subnets/SGs in different shapes.
         if 'Serverless' in cluster:
             vpc_config = cluster['Serverless']['VpcConfigs'][0]
-            ec2 = boto3.client('ec2')
-            subnet_response = ec2.describe_subnets(SubnetIds=[vpc_config['SubnetIds'][0]])
-            vpc_id = subnet_response['Subnets'][0]['VpcId']
-            response = {
-                'VpcId': vpc_id,
-                'SubnetId': vpc_config['SubnetIds'][0],
-                'SecurityGroupId': vpc_config['SecurityGroupIds'][0],
-                'BootstrapBrokers': bootstrap_address
-            }
-            cfnresponse.send(event, context, cfnresponse.SUCCESS, response, event['LogicalResourceId'])
+            subnet_ids = vpc_config['SubnetIds']
+            security_group_id = vpc_config['SecurityGroupIds'][0]
+        else:
+            bng = cluster['Provisioned']['BrokerNodeGroupInfo']
+            subnet_ids = bng['ClientSubnets']
+            security_group_id = bng['SecurityGroups'][0]
+
+        vpc_id = ec2.describe_subnets(SubnetIds=[subnet_ids[0]])['Subnets'][0]['VpcId']
+        result = {
+            'VpcId': vpc_id,
+            'SubnetId': subnet_ids[0],
+            'SecurityGroupId': security_group_id,
+            'BootstrapBrokers': bootstrap_address
+        }
+        status = cfnresponse.SUCCESS
     except Exception as e:
-        print("Failed getting bootstrap brokers:", e)
-        cfnresponse.send(event, context, cfnresponse.FAILED, response, event['LogicalResourceId'])
+        print("MSKLookup failed:", e)
+        status = cfnresponse.FAILED
+    cfnresponse.send(event, context, status, result, event.get('LogicalResourceId', 'msk-lookup'))
 """)
         )
         
