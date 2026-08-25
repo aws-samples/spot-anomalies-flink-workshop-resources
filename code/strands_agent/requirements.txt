@@ -1,6 +1,6 @@
 strands-agents==1.12.0
 strands-agents-tools==0.2.11
-mcp==1.17.0
+mcp==1.23.0
 bedrock-agentcore==0.1.7
 bedrock-agentcore-starter-toolkit==0.1.24
 run-mcp-servers-with-aws-lambda==0.4.4
