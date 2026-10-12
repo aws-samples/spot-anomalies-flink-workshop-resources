@@ -29,7 +29,7 @@ streamable_http_mcp_client = MCPClient(
     )
 )
 
-model_id = "us.anthropic.claude-sonnet-4-6"
+model_id = "global.anthropic.claude-sonnet-5"
 model = BedrockModel(model_id=model_id)
 
 
